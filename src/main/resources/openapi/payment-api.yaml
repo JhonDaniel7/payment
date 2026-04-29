@@ -1,0 +1,726 @@
+openapi: 3.0.3
+
+info:
+  title: Payment Microservice API
+  description: |
+    REST API for managing payment transactions.
+    Designed for multi-region deployment: **Peru** (PEN, Yape, Culqi, Niubiz)
+    and **Italy/Europe** (EUR, SEPA, Nexi, Satispay, Klarna).
+    
+    ## Features
+    - Initiate, authorize and capture payments
+    - Full refund and partial refund
+    - Payment status lifecycle management
+    - Per-region payment method routing
+    - PCI-DSS compliant (masked card data only)
+    - PSD2/SCA compliant (3DS support for EU)
+  version: 1.0.0
+  contact:
+    name: Payment Microservice Team
+    email: payments@microservices.com
+  license:
+    name: Apache 2.0
+
+servers:
+  - url: http://localhost:8083
+    description: Local development
+  - url: https://payments.api.microservices.com
+    description: Production
+
+tags:
+  - name: Payments
+    description: Core payment transaction operations
+  - name: Refunds
+    description: Refund operations on existing payments
+  - name: Status
+    description: Payment lifecycle status management
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  /api/v1/payments:
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Initiate a new payment transaction
+      description: |
+        Creates a new payment and submits it to the appropriate gateway
+        based on `paymentRegion` and `paymentMethod`.
+        For European payments, 3DS/SCA may be required (`REQUIRES_ACTION` status).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+      responses:
+        '201':
+          description: Payment created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+    get:
+      tags: [Payments]
+      operationId: getAllPayments
+      summary: List all payments with optional filters
+      parameters:
+        - name: userId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by user ID
+        - name: orderId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by order ID
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/PaymentStatus'
+          description: Filter by payment status
+        - name: paymentRegion
+          in: query
+          schema:
+            $ref: '#/components/schemas/PaymentRegion'
+          description: Filter by region (PERU, ITALY, EUROPE_SEPA)
+        - name: paymentMethod
+          in: query
+          schema:
+            $ref: '#/components/schemas/PaymentMethod'
+          description: Filter by payment method
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: size
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: sort
+          in: query
+          schema:
+            type: string
+            default: createdAt,desc
+          description: "Sort field and direction, e.g. createdAt,desc"
+      responses:
+        '200':
+          description: Paginated list of payments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentPageResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/v1/payments/{id}:
+    get:
+      tags: [Payments]
+      operationId: getPaymentById
+      summary: Get a payment by its UUID
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Payment found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Payments]
+      operationId: cancelPayment
+      summary: Cancel a payment
+      description: |
+        Cancels a payment. Only allowed when status is `PENDING` or `INITIATED`.
+        Payments already `COMPLETED` or `PROCESSING` cannot be cancelled.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Payment cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/payments/reference/{paymentReference}:
+    get:
+      tags: [Payments]
+      operationId: getPaymentByReference
+      summary: Get a payment by its human-readable reference (e.g. PAY-20240428-A3F7K9)
+      parameters:
+        - name: paymentReference
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Human-readable payment reference
+      responses:
+        '200':
+          description: Payment found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/payments/user/{userId}:
+    get:
+      tags: [Payments]
+      operationId: getPaymentsByUser
+      summary: Get all payments for a specific user
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: size
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Paginated list of payments for the user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentPageResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/payments/order/{orderId}:
+    get:
+      tags: [Payments]
+      operationId: getPaymentsByOrder
+      summary: Get all payments for a specific order
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of payments for the order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── STATUS ──────────────────────────────────────────────────────────────────
+
+  /api/v1/payments/{id}/status:
+    patch:
+      tags: [Status]
+      operationId: updatePaymentStatus
+      summary: Update the lifecycle status of a payment
+      description: |
+        Used by gateway webhooks or internal services to advance the payment lifecycle.
+        Example flows:
+        - `INITIATED` → `AUTHORIZED` → `CAPTURED` → `COMPLETED`
+        - `INITIATED` → `DECLINED`
+        - `COMPLETED` → `CHARGEBACK`
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentStatusUpdateRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  # ── REFUNDS ─────────────────────────────────────────────────────────────────
+
+  /api/v1/payments/{id}/refund:
+    post:
+      tags: [Refunds]
+      operationId: refundPayment
+      summary: Issue a full or partial refund on a completed payment
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundRequest'
+      responses:
+        '200':
+          description: Refund processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+
+  parameters:
+    PaymentId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Payment UUID
+
+  # ── SCHEMAS ─────────────────────────────────────────────────────────────────
+  schemas:
+
+    # ── Request bodies ────────────────────────────────────────────
+    PaymentRequest:
+      type: object
+      required: [orderId, userId, amount, currency, paymentMethod, paymentRegion]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+          description: ID of the order being paid
+        userId:
+          type: string
+          format: uuid
+          description: ID of the user making the payment
+        merchantId:
+          type: string
+          format: uuid
+          description: Merchant ID (optional, for multi-merchant platforms)
+        amount:
+          type: number
+          format: double
+          minimum: 0.01
+          description: Gross amount to be paid
+          example: 150.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+        paymentMethod:
+          $ref: '#/components/schemas/PaymentMethod'
+        paymentGateway:
+          $ref: '#/components/schemas/PaymentGateway'
+        paymentRegion:
+          $ref: '#/components/schemas/PaymentRegion'
+        maskedCardNumber:
+          type: string
+          minLength: 4
+          maxLength: 4
+          description: Last 4 digits of the card only (PCI-DSS compliant)
+          example: "4242"
+        cardBrand:
+          $ref: '#/components/schemas/CardBrand'
+        cardHolderName:
+          type: string
+          maxLength: 150
+          example: Juan Pérez
+        cardExpiry:
+          type: string
+          pattern: '^(0[1-9]|1[0-2])\/\d{2}$'
+          example: "09/27"
+        description:
+          type: string
+          maxLength: 500
+          example: "Order #1042 — Electronics Store"
+        externalReference:
+          type: string
+          maxLength: 255
+          example: "ORD-2024-1042"
+        metadata:
+          type: string
+          description: Arbitrary JSON for gateway-specific fields
+          example: '{"yape_phone": "+51999999999"}'
+        ipAddress:
+          type: string
+          maxLength: 45
+          example: "190.235.12.45"
+        userAgent:
+          type: string
+          maxLength: 500
+        deviceId:
+          type: string
+          maxLength: 255
+
+    RefundRequest:
+      type: object
+      required: [refundAmount]
+      properties:
+        refundAmount:
+          type: number
+          format: double
+          minimum: 0.01
+          description: Amount to refund — cannot exceed original amount
+          example: 50.00
+        refundReason:
+          type: string
+          maxLength: 500
+          example: "Customer requested cancellation"
+
+    PaymentStatusUpdateRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        failureCode:
+          type: string
+          maxLength: 100
+          example: "INSUFFICIENT_FUNDS"
+        failureReason:
+          type: string
+          maxLength: 500
+          example: "Card declined by issuer"
+        transactionId:
+          type: string
+          maxLength: 255
+          example: "txn_3OxBqN2eZvKYlo2C1XXXXXX"
+        notes:
+          type: string
+          maxLength: 1000
+
+    # ── Response bodies ───────────────────────────────────────────
+    PaymentResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        paymentReference:
+          type: string
+          example: "PAY-20240428-A3F7K9"
+        transactionId:
+          type: string
+        externalReference:
+          type: string
+        userId:
+          type: string
+          format: uuid
+        orderId:
+          type: string
+          format: uuid
+        merchantId:
+          type: string
+          format: uuid
+        amount:
+          type: number
+          format: double
+          example: 150.00
+        currency:
+          $ref: '#/components/schemas/Currency'
+        exchangeRate:
+          type: number
+          format: double
+        amountInBaseCurrency:
+          type: number
+          format: double
+        taxAmount:
+          type: number
+          format: double
+        netAmount:
+          type: number
+          format: double
+        feeAmount:
+          type: number
+          format: double
+        paymentMethod:
+          $ref: '#/components/schemas/PaymentMethod'
+        paymentGateway:
+          $ref: '#/components/schemas/PaymentGateway'
+        paymentRegion:
+          $ref: '#/components/schemas/PaymentRegion'
+        status:
+          $ref: '#/components/schemas/PaymentStatus'
+        maskedCardNumber:
+          type: string
+          example: "4242"
+        cardBrand:
+          $ref: '#/components/schemas/CardBrand'
+        cardHolderName:
+          type: string
+        cardExpiry:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        initiatedAt:
+          type: string
+          format: date-time
+        authorizedAt:
+          type: string
+          format: date-time
+        capturedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        cancelledAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        refundAmount:
+          type: number
+          format: double
+        refundTransactionId:
+          type: string
+        refundReason:
+          type: string
+        refundedAt:
+          type: string
+          format: date-time
+        failureCode:
+          type: string
+        failureReason:
+          type: string
+        retryCount:
+          type: integer
+        threeDsStatus:
+          type: string
+        description:
+          type: string
+        notes:
+          type: string
+        metadata:
+          type: string
+
+    PaymentPageResponse:
+      type: object
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaymentResponse'
+        totalElements:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+        currentPage:
+          type: integer
+        pageSize:
+          type: integer
+        hasNext:
+          type: boolean
+        hasPrevious:
+          type: boolean
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: integer
+          example: 404
+        error:
+          type: string
+          example: "PAYMENT_NOT_FOUND"
+        message:
+          type: string
+          example: "Payment with id X was not found"
+        path:
+          type: string
+          example: "/api/v1/payments/abc"
+        timestamp:
+          type: string
+          format: date-time
+
+    # ── Enums ─────────────────────────────────────────────────────
+    PaymentStatus:
+      type: string
+      enum:
+        - PENDING
+        - INITIATED
+        - REQUIRES_ACTION
+        - REQUIRES_CAPTURE
+        - AUTHORIZED
+        - PROCESSING
+        - ON_HOLD
+        - CAPTURED
+        - COMPLETED
+        - REFUND_PENDING
+        - PARTIALLY_REFUNDED
+        - REFUNDED
+        - DECLINED
+        - FAILED
+        - EXPIRED
+        - CANCELLED
+        - CHARGEBACK
+        - CHARGEBACK_WON
+        - CHARGEBACK_LOST
+
+    PaymentMethod:
+      type: string
+      enum:
+        - CREDIT_CARD
+        - DEBIT_CARD
+        - PAYPAL
+        - APPLE_PAY
+        - GOOGLE_PAY
+        - YAPE
+        - PLIN
+        - PAGO_EFECTIVO
+        - SAFETY_PAY
+        - NIUBIZ
+        - CULQI
+        - IZIPAY
+        - BCP_TRANSFER
+        - INTERBANK_TRANSFER
+        - BBVA_TRANSFER_PE
+        - SCOTIABANK_TRANSFER
+        - SEPA_CREDIT_TRANSFER
+        - SEPA_DIRECT_DEBIT
+        - BONIFICO
+        - BANCOMAT
+        - NEXI
+        - POSTEPAY
+        - SATISPAY
+        - SCALAPAY
+        - KLARNA
+        - STRIPE
+        - AMAZON_PAY
+
+    Currency:
+      type: string
+      enum: [PEN, USD, EUR, CHF, GBP]
+
+    PaymentGateway:
+      type: string
+      enum:
+        - STRIPE
+        - PAYPAL
+        - CULQI
+        - NIUBIZ
+        - IZIPAY
+        - SAFETY_PAY
+        - NEXI
+        - KLARNA
+        - SCALAPAY
+        - SATISPAY
+        - POSTEPAY
+        - ADYEN
+
+    PaymentRegion:
+      type: string
+      enum: [PERU, ITALY, EUROPE_SEPA, INTERNATIONAL]
+
+    CardBrand:
+      type: string
+      enum:
+        - VISA
+        - MASTERCARD
+        - AMERICAN_EXPRESS
+        - DINERS_CLUB
+        - DISCOVER
+        - JCB
+        - UNIONPAY
+        - BANCOMAT
+        - NEXI
+        - UNKNOWN
+
+  # ── Reusable responses ────────────────────────────────────────
+  responses:
+    BadRequest:
+      description: Invalid request body or parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Operation not allowed for the current payment state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    UnprocessableEntity:
+      description: Business rule violation (e.g. refund exceeds original amount)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Security ──────────────────────────────────────────────────
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+security:
+  - bearerAuth: []
