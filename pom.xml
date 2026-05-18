@@ -16,7 +16,9 @@ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/x
 
 <properties>
 <java.version>21</java.version>
-<openapi-generator.version>7.12.0</openapi-generator.version>
+
+
+
 </properties>
 
 <dependencies>
@@ -68,16 +70,23 @@ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/x
 <version>2.8.8</version>
 </dependency>
 
-<!-- Required by openapi-generator for annotation support -->
+<!-- JWT -->
 <dependency>
-<groupId>io.swagger.core.v3</groupId>
-<artifactId>swagger-annotations</artifactId>
-<version>2.2.28</version>
+<groupId>io.jsonwebtoken</groupId>
+<artifactId>jjwt-api</artifactId>
+<version>0.12.6</version>
 </dependency>
 <dependency>
-<groupId>org.openapitools</groupId>
-<artifactId>jackson-databind-nullable</artifactId>
-<version>0.2.6</version>
+<groupId>io.jsonwebtoken</groupId>
+<artifactId>jjwt-impl</artifactId>
+<version>0.12.6</version>
+<scope>runtime</scope>
+</dependency>
+<dependency>
+<groupId>io.jsonwebtoken</groupId>
+<artifactId>jjwt-jackson</artifactId>
+<version>0.12.6</version>
+<scope>runtime</scope>
 </dependency>
 </dependencies>
 
@@ -112,72 +121,6 @@ xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/x
 </configuration>
 </plugin>
 
-<!--
-OpenAPI Generator Plugin — API-First approach
-Generates from: src/main/resources/openapi/payment-api.yaml
-  - API interfaces  -> target/generated-sources/openapi/src/main/java/com/microservices/payment/api/
-  - DTOs (models)   -> target/generated-sources/openapi/src/main/java/com/microservices/payment/model/dto/
-The controller implements the generated interface (PaymentApi).
-Run: mvn generate-sources
--->
-<plugin>
-<groupId>org.openapitools</groupId>
-<artifactId>openapi-generator-maven-plugin</artifactId>
-<version>${openapi-generator.version}</version>
-<executions>
-<execution>
-<id>generate-payment-api</id>
-<goals>
-<goal>generate</goal>
-</goals>
-<configuration>
-<!-- Input spec -->
-<inputSpec>${project.basedir}/src/main/resources/openapi/payment-api.yaml</inputSpec>
-
-<!-- Generator: Spring server stubs -->
-<generatorName>spring</generatorName>
-
-<!-- Output packages -->
-<apiPackage>com.microservices.payment.api</apiPackage>
-<modelPackage>com.microservices.payment.model.dto</modelPackage>
-<invokerPackage>com.microservices.payment.api</invokerPackage>
-
-<configOptions>
-<!-- Only generate interfaces — the controller implements them -->
-<interfaceOnly>true</interfaceOnly>
-
-<!-- Spring Boot 3 / Jakarta EE 10 -->
-<useSpringBoot3>true</useSpringBoot3>
-
-<!-- Use springdoc-openapi for Swagger annotations -->
-<documentationProvider>springdoc</documentationProvider>
-
-<!-- Use Java 8+ date/time types (LocalDateTime) -->
-<dateLibrary>java8</dateLibrary>
-
-<!-- Group operations by OpenAPI tag -->
-<useTags>true</useTags>
-
-<!-- Use jakarta.* instead of javax.* -->
-<useJakartaEe>true</useJakartaEe>
-
-<!-- Bean Validation annotations on models -->
-<useBeanValidation>true</useBeanValidation>
-<performBeanValidation>true</performBeanValidation>
-
-<!-- Use BigDecimal for number type -->
-<useBigDecimalForNumbers>true</useBigDecimalForNumbers>
-
-<!-- Skip generating the Spring Boot Application class -->
-<generateSpringApplication>false</generateSpringApplication>
-
-<!-- Use optional wrapper for nullable fields -->
-<openApiNullable>false</openApiNullable>
-</configOptions>
-</configuration>
-</execution>
-</executions>
-</plugin>
 
 </plugins>
 </build>
