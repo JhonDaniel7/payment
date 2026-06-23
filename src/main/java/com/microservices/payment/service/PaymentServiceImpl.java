@@ -9,6 +9,7 @@ import com.microservices.payment.exception.InvalidPaymentStateException;
 import com.microservices.payment.exception.PaymentNotFoundException;
 import com.microservices.payment.gateway.GatewayResponse;
 import com.microservices.payment.gateway.PaymentGatewayPort;
+import com.microservices.payment.gateway.nexi.dto.NexiWebhookPayload;
 import com.microservices.payment.model.entity.Payment;
 import com.microservices.payment.model.enums.PaymentMethod;
 import com.microservices.payment.model.enums.PaymentRegion;
@@ -115,7 +116,7 @@ public class PaymentServiceImpl implements PaymentService {
     public PaymentPageResponse getAll(UUID userId, UUID orderId, PaymentStatus status,
                                       PaymentRegion region, PaymentMethod method,
                                       int page, int size, String sort) {
-        Specification<Payment> spec = Specification.unrestricted();
+        Specification<Payment> spec = (root, query, cb) -> cb.conjunction();
 
         if (userId != null)  spec = spec.and((r, q, cb) -> cb.equal(r.get("userId"), userId));
         if (orderId != null) spec = spec.and((r, q, cb) -> cb.equal(r.get("orderId"), orderId));
@@ -222,6 +223,55 @@ public class PaymentServiceImpl implements PaymentService {
     }
 
     // ─────────────────────────────────────────────────────────
+    // NEXI WEBHOOK
+    // ─────────────────────────────────────────────────────────
+
+    @Override
+    @Transactional
+    public void handleNexiWebhook(NexiWebhookPayload payload) {
+        NexiWebhookPayload.NexiOperation op = payload.getOperation();
+        log.info("Nexi webhook received — orderId={} operationResult={}", op.getOrderId(), op.getOperationResult());
+
+        // Look up by the securityToken we stored in transactionId at charge time
+        Payment payment = paymentRepository.findByTransactionId(payload.getSecurityToken())
+                .orElseThrow(() -> new PaymentNotFoundException(
+                        "No payment found for Nexi securityToken: " + payload.getSecurityToken()));
+
+        PaymentStatus newStatus = mapNexiResult(op.getOperationResult());
+
+        // Replace temporary securityToken with the real Nexi operationId
+        payment.setTransactionId(op.getOperationId());
+        payment.setStatus(newStatus);
+        applyStatusTimestamp(payment, newStatus);
+
+        if (op.getCustomerInfo() != null) {
+            payment.setCardHolderName(op.getCustomerInfo().getCardHolderName());
+        }
+        if (op.getPaymentInstrumentInfo() != null) {
+            String last4 = op.getPaymentInstrumentInfo().replaceAll("[^0-9]", "");
+            if (last4.length() >= 4) {
+                payment.setMaskedCardNumber(last4.substring(last4.length() - 4));
+            }
+        }
+
+        paymentRepository.save(payment);
+        log.info("Payment updated from Nexi webhook — id={} status={}", payment.getId(), newStatus);
+    }
+
+    private PaymentStatus mapNexiResult(String operationResult) {
+        if (operationResult == null) return PaymentStatus.PENDING;
+        return switch (operationResult.toUpperCase()) {
+            case "AUTHORIZED"                          -> PaymentStatus.AUTHORIZED;
+            case "EXECUTED"                            -> PaymentStatus.COMPLETED;
+            case "THREEDS_VALIDATED"                   -> PaymentStatus.REQUIRES_ACTION;
+            case "PENDING"                             -> PaymentStatus.PENDING;
+            case "CANCELED", "VOIDED", "REVERSED"     -> PaymentStatus.CANCELLED;
+            case "REFUNDED"                            -> PaymentStatus.REFUNDED;
+            default                                    -> PaymentStatus.FAILED;
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────
     // PRIVATE HELPERS
     // ─────────────────────────────────────────────────────────
 
@@ -241,6 +291,7 @@ public class PaymentServiceImpl implements PaymentService {
     private void applyGatewayResponse(Payment payment, GatewayResponse response) {
         payment.setStatus(response.getStatus());
         payment.setTransactionId(response.getTransactionId());
+        payment.setSessionId(response.getSessionId());
         payment.setFailureCode(response.getFailureCode());
         payment.setFailureReason(response.getFailureReason());
         payment.setGatewayErrorMessage(response.getGatewayErrorMessage());
@@ -294,6 +345,7 @@ public class PaymentServiceImpl implements PaymentService {
                 .id(p.getId())
                 .paymentReference(p.getPaymentReference())
                 .transactionId(p.getTransactionId())
+                .sessionId(p.getSessionId())
                 .externalReference(p.getExternalReference())
                 .userId(p.getUserId())
                 .orderId(p.getOrderId())

@@ -36,6 +36,22 @@ security:
     secret-key: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
     expiration: 86400000
 
+gateway:
+  culqi:
+    base-url: ${CULQI_BASE_URL:https://api.culqi.com/v2}
+    # Chiave privata del backend (NON la chiave pubblica usata dal frontend)
+    api-key: ${CULQI_API_KEY:}
+  nexi:
+    # Sandbox: https://int-ecommerce.nexi.it/ecomm/api/phoenix-0.0/psp/api/v1
+    # Production: https://xpay.nexigroup.com/api/phoenix-0.0/psp/api/v1
+    base-url: ${NEXI_BASE_URL:https://int-ecommerce.nexi.it/ecomm/api/phoenix-0.0/psp/api/v1}
+    api-key: ${NEXI_API_KEY:}
+    # URL che Nexi chiama dopo il pagamento (deve essere raggiungibile da Internet — usa ngrok in locale)
+    notification-url: ${NEXI_NOTIFICATION_URL:}
+    # Dove Nexi reindirizza l'utente dopo il pagamento (frontend)
+    result-url: ${NEXI_RESULT_URL:http://localhost:3000/payment/result}
+    cancel-url: ${NEXI_CANCEL_URL:http://localhost:3000/payment/cancel}
+
 logging:
   level:
     com.microservices.payment: DEBUG

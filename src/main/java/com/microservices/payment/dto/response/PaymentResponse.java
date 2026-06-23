@@ -15,6 +15,7 @@ public class PaymentResponse {
     UUID id;
     String paymentReference;
     String transactionId;
+    String sessionId;
     String externalReference;
 
     UUID userId;

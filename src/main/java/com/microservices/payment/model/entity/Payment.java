@@ -59,6 +59,13 @@ public class Payment {
     private String transactionId;
 
     /**
+     * Nexi.js session ID returned by /orders/2steps/init.
+     * Used by the frontend to initialize XPay.js. Null for other gateways.
+     */
+    @Column(name = "session_id", length = 255)
+    private String sessionId;
+
+    /**
      * Optional reference from the external system (e.g. order service, ERP).
      */
     @Column(name = "external_reference", length = 255)

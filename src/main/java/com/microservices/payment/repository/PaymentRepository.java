@@ -32,4 +32,6 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID>, JpaSpec
     Page<Payment> findByPaymentMethod(PaymentMethod paymentMethod, Pageable pageable);
 
     boolean existsByPaymentReference(String paymentReference);
+
+    Optional<Payment> findByTransactionId(String transactionId);
 }

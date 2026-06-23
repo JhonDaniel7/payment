@@ -29,4 +29,7 @@ public class GatewayResponse {
 
     /** Redirect URL for 3DS authentication — populated only when requiresAction is true. */
     String actionUrl;
+
+    /** Nexi.js session ID from /orders/2steps/init — passed to XPay.init() on the frontend. */
+    String sessionId;
 }

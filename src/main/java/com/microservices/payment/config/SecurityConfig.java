@@ -32,8 +32,9 @@ public class SecurityConfig {
                     "/api-docs",
                     "/api-docs/**"
                 ).permitAll()
-                // Gateway webhook — status updates from Culqi/Nexi callbacks
-                // TODO: replace with webhook signature validation per gateway
+                // Nexi HPP webhook — Nexi calls this after the user completes payment
+                .requestMatchers(HttpMethod.POST, "/api/v1/webhooks/nexi").permitAll()
+                // Legacy gateway webhook
                 .requestMatchers(HttpMethod.PATCH, "/api/v1/payments/*/status").permitAll()
                 // Everything else requires a valid JWT
                 .anyRequest().authenticated()

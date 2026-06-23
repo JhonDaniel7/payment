@@ -5,6 +5,7 @@ import com.microservices.payment.dto.request.PaymentStatusUpdateRequest;
 import com.microservices.payment.dto.request.RefundRequest;
 import com.microservices.payment.dto.response.PaymentPageResponse;
 import com.microservices.payment.dto.response.PaymentResponse;
+import com.microservices.payment.gateway.nexi.dto.NexiWebhookPayload;
 import com.microservices.payment.model.enums.PaymentMethod;
 import com.microservices.payment.model.enums.PaymentRegion;
 import com.microservices.payment.model.enums.PaymentStatus;
@@ -33,4 +34,6 @@ public interface PaymentService {
     PaymentResponse refund(UUID id, RefundRequest request);
 
     PaymentResponse cancel(UUID id);
+
+    void handleNexiWebhook(NexiWebhookPayload payload);
 }
