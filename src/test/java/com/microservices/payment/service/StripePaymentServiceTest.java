@@ -201,6 +201,82 @@ class StripePaymentServiceTest {
 
         assertThatThrownBy(() -> service.handleWebhook(payload, sign(payload)))
                 .isInstanceOf(OrderServiceException.class);
+        verify(refundService, never()).create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class));
+    }
+
+    // ─────────────────────────────────────────────────────────
+    // automatic refund — order paid after being cancelled
+    // ─────────────────────────────────────────────────────────
+
+    @Test
+    void webhook_succeeded_orderNoLongerPayable_refundsAutomatically() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        org.mockito.Mockito.doThrow(new OrderStateConflictException("Order is CANCELLED, expected PENDING_PAYMENT"))
+                .when(orderServiceClient).updateOrderPayment(eq(orderId), any(), eq("PAID"));
+        when(refundService.create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class)))
+                .thenReturn(refund("re_auto", "pending", 2000));
+        String payload = event("payment_intent.succeeded", "pi_123", "succeeded");
+
+        service.handleWebhook(payload, sign(payload));
+
+        ArgumentCaptor<com.stripe.param.RefundCreateParams> params = ArgumentCaptor.forClass(com.stripe.param.RefundCreateParams.class);
+        ArgumentCaptor<RequestOptions> options = ArgumentCaptor.forClass(RequestOptions.class);
+        verify(refundService).create(params.capture(), options.capture());
+        assertThat(params.getValue().getPaymentIntent()).isEqualTo("pi_123");
+        assertThat(params.getValue().getAmount()).isNull(); // full refund
+        assertThat(((java.util.Map<?, ?>) params.getValue().getMetadata()).get("autoRefund")).isEqualTo("true");
+        assertThat(options.getValue().getIdempotencyKey()).isEqualTo("auto-refund-" + payment.getId());
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUND_PENDING);
+        assertThat(payment.getRefundTransactionId()).isEqualTo("re_auto");
+        assertThat(payment.getNotes()).contains("Automatic refund").contains("CANCELLED");
+    }
+
+    @Test
+    void chargeRefunded_forAutoRefund_updatesPaymentButNeverTouchesTheOrder() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.REFUND_PENDING);
+        payment.setRefundTransactionId("re_auto");
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        com.stripe.model.Refund auto = refund("re_auto", "succeeded", 2000);
+        auto.setMetadata(java.util.Map.of("autoRefund", "true"));
+        stripeRefunds(auto);
+        String payload = chargeRefundedEvent();
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
+        assertThat(payment.getRefundAmount()).isEqualByComparingTo("20.00");
+        verify(orderServiceClient, never()).getOrder(any());
+        verify(orderServiceClient, never()).recordRefund(any(), any(), anyString(), any(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void webhook_succeeded_redeliveredAfterAutoRefund_neverRefundsTwice() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.REFUND_PENDING);
+        payment.setRefundTransactionId("re_auto");
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        org.mockito.Mockito.doThrow(new OrderStateConflictException("Order is CANCELLED"))
+                .when(orderServiceClient).updateOrderPayment(eq(orderId), any(), eq("PAID"));
+        String payload = event("payment_intent.succeeded", "pi_123", "succeeded");
+
+        service.handleWebhook(payload, sign(payload));
+
+        verify(refundService, never()).create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class));
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUND_PENDING);
+    }
+
+    @Test
+    void webhook_succeeded_autoRefundRefusedByStripe_propagatesSoStripeRetries() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        org.mockito.Mockito.doThrow(new OrderNotFoundException(orderId))
+                .when(orderServiceClient).updateOrderPayment(eq(orderId), any(), eq("PAID"));
+        when(refundService.create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class)))
+                .thenThrow(new com.stripe.exception.ApiConnectionException("network down"));
+        String payload = event("payment_intent.succeeded", "pi_123", "succeeded");
+
+        assertThatThrownBy(() -> service.handleWebhook(payload, sign(payload)))
+                .isInstanceOf(com.microservices.payment.exception.GatewayException.class);
     }
 
     @Test

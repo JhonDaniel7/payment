@@ -298,13 +298,51 @@ public class StripePaymentService {
         try {
             orderServiceClient.updateOrderPayment(payment.getOrderId(), payment.getId(), "PAID");
         } catch (OrderStateConflictException | OrderNotFoundException ex) {
-            // Money was collected but the order can no longer be paid (e.g. cancelled meanwhile).
-            // Retrying would not help: flag it for a manual refund and acknowledge the event.
-            log.error("MANUAL ACTION REQUIRED — payment {} succeeded but order {} could not be marked PAID: {}",
-                    payment.getId(), payment.getOrderId(), ex.getMessage());
-            payment.setNotes(truncate("Paid but order not updatable — refund required: " + ex.getMessage(), 1000));
-            paymentRepository.save(payment);
+            // Money was collected but the order can no longer be paid (cancelled meanwhile, already paid
+            // by another payment, or gone): give the money back.
+            autoRefund(payment, ex.getMessage());
         }
+    }
+
+    /**
+     * Full refund of a payment whose order cannot accept it. Runs at most once per payment: the
+     * idempotency key is fixed and a payment that already has a refund is skipped, so a re-delivered
+     * {@code payment_intent.succeeded} never refunds twice. If Stripe refuses, the error propagates →
+     * non-2xx → Stripe re-delivers the event and the refund is retried. The final amounts are then
+     * recorded, as for every refund, by the {@code charge.refunded} webhook.
+     */
+    private void autoRefund(Payment payment, String why) {
+        if (payment.getRefundTransactionId() != null
+                || payment.getStatus() == PaymentStatus.REFUND_PENDING
+                || payment.getStatus() == PaymentStatus.PARTIALLY_REFUNDED
+                || payment.getStatus() == PaymentStatus.REFUNDED) {
+            log.info("Automatic refund already issued — paymentId={} refund={}", payment.getId(), payment.getRefundTransactionId());
+            return;
+        }
+        log.warn("Payment {} succeeded but order {} cannot accept it ({}) — refunding automatically",
+                payment.getId(), payment.getOrderId(), why);
+
+        RefundCreateParams params = RefundCreateParams.builder()
+                .setPaymentIntent(payment.getTransactionId()) // no amount = full refund
+                .setReason(RefundCreateParams.Reason.REQUESTED_BY_CUSTOMER)
+                .putMetadata("paymentId", payment.getId().toString())
+                .putMetadata("orderId", payment.getOrderId().toString())
+                .putMetadata("autoRefund", "true")
+                .putMetadata("reason", "Order not payable")
+                .build();
+        RequestOptions options = RequestOptions.builder()
+                .setIdempotencyKey("auto-refund-" + payment.getId())
+                .build();
+
+        Refund refund = stripeCall("create automatic Refund", () -> stripe.v1().refunds().create(params, options));
+
+        String reason = truncate("Automatic refund — order not payable: " + why, 500);
+        payment.setStatus(PaymentStatus.REFUND_PENDING);
+        payment.setRefundReason(reason);
+        payment.setRefundTransactionId(refund.getId());
+        payment.setNotes(truncate(reason + " (refund " + refund.getId() + ")", 1000));
+        paymentRepository.save(payment);
+        log.info("Automatic refund issued — paymentId={} refund={} status={}", payment.getId(), refund.getId(), refund.getStatus());
     }
 
     /**
@@ -415,12 +453,17 @@ public class StripePaymentService {
         log.info("Stripe refunds synced — paymentId={} refunded {} → {} status={}",
                 payment.getId(), previous, activeTotal, payment.getStatus());
 
-        if (refunds.isEmpty()) return;
+        if (refunds.isEmpty() || refunds.stream().allMatch(StripePaymentService::isAutoRefund)) return;
 
         // Transport errors propagate → non-2xx → Stripe retries (the transaction rolls back).
         OrderSnapshot order = orderServiceClient.getOrder(payment.getOrderId());
         List<String> rejected = new ArrayList<>();
         for (Refund refund : refunds.reversed()) { // oldest first: ledger in chronological order
+            if (isAutoRefund(refund)) {
+                // This payment was never accepted by the order (see autoRefund): its refund must not
+                // touch the order's ledger — e.g. the order may be regularly PAID by another payment.
+                continue;
+            }
             String reference = "stripe-refund:" + refund.getId();
             BigDecimal amount = BigDecimal.valueOf(refund.getAmount()).movePointLeft(2);
             try {
@@ -452,6 +495,10 @@ public class StripePaymentService {
             log.warn("PaymentIntent {} has more than 100 refunds — only the latest 100 are synced", paymentIntentId);
         }
         return page.getData() != null ? page.getData() : List.of();
+    }
+
+    private static boolean isAutoRefund(Refund refund) {
+        return refund.getMetadata() != null && "true".equals(refund.getMetadata().get("autoRefund"));
     }
 
     private static String refundReason(Refund refund, Payment payment) {

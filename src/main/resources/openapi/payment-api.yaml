@@ -363,7 +363,11 @@ paths:
         Public endpoint authenticated by the `Stripe-Signature` header (signing secret
         STRIPE_WEBHOOK_SECRET). `payment_intent.succeeded` completes the payment and marks the
         order PAID; `payment_intent.payment_failed` marks the payment DECLINED/FAILED and leaves the
-        order in PENDING_PAYMENT so the customer can retry. `charge.refunded` (refunds requested via
+        order in PENDING_PAYMENT so the customer can retry. If a payment succeeds but its order can no
+        longer accept it (cancelled meanwhile, already paid by another payment, or not found) the payment
+        is refunded in full automatically, once; that refund never touches the order's ledger.
+        `refund.failed` / `refund.updated` (failed or canceled) cancel the refund on payment and order.
+        `charge.refunded` (refunds requested via
         POST /api/v1/payments/{id}/refund or made from the Stripe dashboard) records the new refunded
         amount on the payment and in the order's refund ledger (order → PARTIALLY_REFUNDED / REFUNDED).
         Idempotent: re-delivered events are safe.
