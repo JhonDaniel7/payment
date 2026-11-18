@@ -12,6 +12,8 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.math.BigDecimal;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -46,6 +48,42 @@ public class OrderServiceClient {
             throw new OrderServiceException("order-service returned " + ex.getStatusCode() + " for order " + orderId, ex);
         } catch (RestClientException ex) {
             throw new OrderServiceException("order-service unreachable while reading order " + orderId, ex);
+        }
+    }
+
+    /**
+     * Records a refund in the order's ledger; order-service moves the order to PARTIALLY_REFUNDED / REFUNDED.
+     * Idempotent on {@code externalReference}: resubmitting the same value is a no-op.
+     *
+     * @throws OrderStateConflictException if order-service rejects it (e.g. exceeds the refundable total)
+     */
+    public void recordRefund(UUID orderId, Long orderInternalId, String externalReference,
+                             BigDecimal amount, String reason) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("externalReference", externalReference);
+        body.put("amount", amount);
+        body.put("type", "REFUND");
+        if (reason != null) body.put("reason", reason.length() > 255 ? reason.substring(0, 255) : reason);
+        try {
+            restClient.post()
+                    .uri("/orders/{id}/refunds", orderInternalId)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .toBodilessEntity();
+            log.info("order-service refund recorded — orderId={} amount={} ref={}", orderId, amount, externalReference);
+        } catch (RestClientResponseException ex) {
+            int code = ex.getStatusCode().value();
+            if (code == HttpStatus.NOT_FOUND.value()) {
+                throw new OrderNotFoundException(orderId);
+            }
+            if (code == HttpStatus.BAD_REQUEST.value() || code == HttpStatus.CONFLICT.value()) {
+                throw new OrderStateConflictException(
+                        "order-service refused refund for order " + orderId + ": " + ex.getResponseBodyAsString());
+            }
+            throw new OrderServiceException("order-service returned " + ex.getStatusCode() + " recording refund for order " + orderId, ex);
+        } catch (RestClientException ex) {
+            throw new OrderServiceException("order-service unreachable while recording refund for order " + orderId, ex);
         }
     }
 

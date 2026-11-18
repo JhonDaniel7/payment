@@ -292,6 +292,9 @@ paths:
       tags: [Refunds]
       operationId: refundPayment
       summary: Issue a full or partial refund on a completed payment
+      description: |
+        For STRIPE payments the refund is requested on Stripe and the payment goes to REFUND_PENDING;
+        the final amounts and the order update arrive with the `charge.refunded` webhook.
       parameters:
         - $ref: '#/components/parameters/PaymentId'
       requestBody:
@@ -360,7 +363,10 @@ paths:
         Public endpoint authenticated by the `Stripe-Signature` header (signing secret
         STRIPE_WEBHOOK_SECRET). `payment_intent.succeeded` completes the payment and marks the
         order PAID; `payment_intent.payment_failed` marks the payment DECLINED/FAILED and leaves the
-        order in PENDING_PAYMENT so the customer can retry. Idempotent: re-delivered events are safe.
+        order in PENDING_PAYMENT so the customer can retry. `charge.refunded` (refunds requested via
+        POST /api/v1/payments/{id}/refund or made from the Stripe dashboard) records the new refunded
+        amount on the payment and in the order's refund ledger (order → PARTIALLY_REFUNDED / REFUNDED).
+        Idempotent: re-delivered events are safe.
       security: []
       parameters:
         - name: Stripe-Signature

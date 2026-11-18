@@ -11,6 +11,7 @@ import com.microservices.payment.gateway.GatewayResponse;
 import com.microservices.payment.gateway.PaymentGatewayPort;
 import com.microservices.payment.gateway.nexi.dto.NexiWebhookPayload;
 import com.microservices.payment.model.entity.Payment;
+import com.microservices.payment.model.enums.PaymentGateway;
 import com.microservices.payment.model.enums.PaymentMethod;
 import com.microservices.payment.model.enums.PaymentRegion;
 import com.microservices.payment.model.enums.PaymentStatus;
@@ -48,6 +49,7 @@ public class PaymentServiceImpl implements PaymentService {
 
     private final PaymentRepository paymentRepository;
     private final List<PaymentGatewayPort> gateways;
+    private final StripePaymentService stripePaymentService;
 
     // ─────────────────────────────────────────────────────────
     // CREATE
@@ -184,6 +186,12 @@ public class PaymentServiceImpl implements PaymentService {
         if (newTotal.compareTo(payment.getAmount()) > 0) {
             throw new InvalidPaymentStateException(
                     "Refund amount exceeds original payment amount");
+        }
+
+        // Stripe payments are refunded on Stripe (region/method routing would pick another gateway).
+        // The outcome is recorded asynchronously by the charge.refunded webhook.
+        if (payment.getPaymentGateway() == PaymentGateway.STRIPE) {
+            return toResponse(stripePaymentService.requestRefund(payment, request.getRefundAmount(), request.getRefundReason()));
         }
 
         PaymentGatewayPort gateway = resolveGateway(payment.getPaymentRegion(), payment.getPaymentMethod());

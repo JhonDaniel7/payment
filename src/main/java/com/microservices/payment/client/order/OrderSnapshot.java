@@ -17,7 +17,9 @@ public record OrderSnapshot(
         String currency,
         BigDecimal total,
         Customer customer,
-        ShippingAddress shippingAddress
+        ShippingAddress shippingAddress,
+        /** order-service internal id — needed by the endpoints still addressed by Long id (e.g. refunds). */
+        Long id
 ) {
 
     public static final String STATUS_PENDING_PAYMENT = "PENDING_PAYMENT";
