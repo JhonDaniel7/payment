@@ -75,8 +75,15 @@ public class Payment {
     // PARTIES INVOLVED
     // ─────────────────────────────────────────────────────────
 
-    @Column(name = "user_id", nullable = false)
+    /** Null for guest checkout and for Stripe payments (see customerId). */
+    @Column(name = "user_id")
     private UUID userId;
+
+    /**
+     * JWT subject of the paying customer, as stored by order-service. Null for guest checkout.
+     */
+    @Column(name = "customer_id", length = 255)
+    private String customerId;
 
     @Column(name = "order_id", nullable = false)
     private UUID orderId;

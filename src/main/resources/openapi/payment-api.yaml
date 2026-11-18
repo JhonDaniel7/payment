@@ -34,6 +34,8 @@ tags:
     description: Refund operations on existing payments
   - name: Status
     description: Payment lifecycle status management
+  - name: Stripe
+    description: Stripe PaymentIntents checkout and webhook
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PATHS
@@ -314,6 +316,73 @@ paths:
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
+  # ── STRIPE ──────────────────────────────────────────────────────────────────
+
+  /api/v1/payments/intents:
+    post:
+      tags: [Stripe]
+      operationId: createPaymentIntent
+      summary: Create (or reuse) the Stripe PaymentIntent for an order
+      description: |
+        The amount is never taken from the request: it is read server-side from order-service
+        (`GET /orders/public/{orderId}`). If the order already has a confirmable intent
+        (e.g. after a declined card or a page reload) the same intent is returned.
+        Open to guest checkout; when a JWT is sent, the order must belong to its subject.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentIntentRequest'
+      responses:
+        '200':
+          description: PaymentIntent ready to be confirmed with Stripe.js
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentIntentResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Order not found (or it belongs to another customer)
+        '409':
+          description: Order not in PENDING_PAYMENT, or a payment for it is already completed / processing
+        '502':
+          description: Stripe or order-service call failed
+
+  /api/v1/webhooks/stripe:
+    post:
+      tags: [Stripe]
+      operationId: handleStripeWebhook
+      summary: Stripe webhook (payment_intent.* events)
+      description: |
+        Public endpoint authenticated by the `Stripe-Signature` header (signing secret
+        STRIPE_WEBHOOK_SECRET). `payment_intent.succeeded` completes the payment and marks the
+        order PAID; `payment_intent.payment_failed` marks the payment DECLINED/FAILED and leaves the
+        order in PENDING_PAYMENT so the customer can retry. Idempotent: re-delivered events are safe.
+      security: []
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Raw Stripe Event, verified byte-for-byte against the signature
+      responses:
+        '200':
+          description: Event processed (or ignored)
+        '400':
+          description: Missing or invalid signature
+        '502':
+          description: order-service unavailable — Stripe will retry
+
 # ─────────────────────────────────────────────────────────────────────────────
 # COMPONENTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -331,6 +400,31 @@ components:
 
   # ── SCHEMAS ─────────────────────────────────────────────────────────────────
   schemas:
+
+    CreatePaymentIntentRequest:
+      type: object
+      required: [orderId, provider]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+          description: The `orderId` returned by order-service POST /orders
+        provider:
+          type: string
+          enum: [STRIPE]
+
+    CreatePaymentIntentResponse:
+      type: object
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          enum: [STRIPE]
+        clientSecret:
+          type: string
+          description: PaymentIntent client secret for stripe.confirmCardPayment — not the Stripe secret key
 
     # ── Request bodies ────────────────────────────────────────────
     PaymentRequest:

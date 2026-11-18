@@ -4,6 +4,7 @@ import com.microservices.payment.dto.response.ErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -29,6 +30,41 @@ public class GlobalExceptionHandler {
     public ErrorResponse handleInvalidState(InvalidPaymentStateException ex, HttpServletRequest request) {
         log.warn("Invalid payment state: {}", ex.getMessage());
         return build(HttpStatus.CONFLICT, "INVALID_PAYMENT_STATE", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(OrderNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ErrorResponse handleOrderNotFound(OrderNotFoundException ex, HttpServletRequest request) {
+        log.warn("Order not found: {}", ex.getMessage());
+        return build(HttpStatus.NOT_FOUND, "ORDER_NOT_FOUND", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(OrderStateConflictException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public ErrorResponse handleOrderState(OrderStateConflictException ex, HttpServletRequest request) {
+        log.warn("Invalid order state: {}", ex.getMessage());
+        return build(HttpStatus.CONFLICT, "INVALID_ORDER_STATE", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(OrderServiceException.class)
+    @ResponseStatus(HttpStatus.BAD_GATEWAY)
+    public ErrorResponse handleOrderService(OrderServiceException ex, HttpServletRequest request) {
+        log.error("order-service error: {}", ex.getMessage(), ex);
+        return build(HttpStatus.BAD_GATEWAY, "ORDER_SERVICE_ERROR", "Order service unavailable", request);
+    }
+
+    @ExceptionHandler(InvalidWebhookSignatureException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ErrorResponse handleWebhookSignature(InvalidWebhookSignatureException ex, HttpServletRequest request) {
+        log.warn("Rejected webhook: {}", ex.getMessage());
+        return build(HttpStatus.BAD_REQUEST, "INVALID_SIGNATURE", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ErrorResponse handleUnreadable(HttpMessageNotReadableException ex, HttpServletRequest request) {
+        log.warn("Malformed request body: {}", ex.getMessage());
+        return build(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Malformed or invalid request body", request);
     }
 
     @ExceptionHandler(GatewayException.class)

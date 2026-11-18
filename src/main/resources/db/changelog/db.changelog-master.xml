@@ -7,5 +7,6 @@
 
     <include file="db/changelog/changes/001-create-payment-table.xml"/>
     <include file="db/changelog/changes/002-add-session-id.xml"/>
+    <include file="db/changelog/changes/003-guest-checkout-customer-id.xml"/>
 
 </databaseChangeLog>

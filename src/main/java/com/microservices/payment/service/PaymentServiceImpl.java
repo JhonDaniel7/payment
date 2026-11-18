@@ -348,6 +348,7 @@ public class PaymentServiceImpl implements PaymentService {
                 .sessionId(p.getSessionId())
                 .externalReference(p.getExternalReference())
                 .userId(p.getUserId())
+                .customerId(p.getCustomerId())
                 .orderId(p.getOrderId())
                 .merchantId(p.getMerchantId())
                 .amount(p.getAmount())

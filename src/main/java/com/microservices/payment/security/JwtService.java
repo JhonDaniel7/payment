@@ -3,13 +3,13 @@ package com.microservices.payment.security;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.SecretKey;
-import java.util.HexFormat;
 
 @Slf4j
 @Service
@@ -40,8 +40,9 @@ public class JwtService {
                 .getPayload();
     }
 
+    /** Base64-encoded, same format and value as product-service / order-service. */
     private SecretKey signingKey() {
-        byte[] keyBytes = HexFormat.of().parseHex(secretKey);
+        byte[] keyBytes = Decoders.BASE64.decode(secretKey);
         return Keys.hmacShaKeyFor(keyBytes);
     }
 }

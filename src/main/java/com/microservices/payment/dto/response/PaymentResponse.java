@@ -19,6 +19,7 @@ public class PaymentResponse {
     String externalReference;
 
     UUID userId;
+    String customerId;
     UUID orderId;
     UUID merchantId;
 

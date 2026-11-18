@@ -1,6 +1,7 @@
 package com.microservices.payment.repository;
 
 import com.microservices.payment.model.entity.Payment;
+import com.microservices.payment.model.enums.PaymentGateway;
 import com.microservices.payment.model.enums.PaymentMethod;
 import com.microservices.payment.model.enums.PaymentRegion;
 import com.microservices.payment.model.enums.PaymentStatus;
@@ -34,4 +35,8 @@ public interface PaymentRepository extends JpaRepository<Payment, UUID>, JpaSpec
     boolean existsByPaymentReference(String paymentReference);
 
     Optional<Payment> findByTransactionId(String transactionId);
+
+    Optional<Payment> findFirstByOrderIdAndPaymentGatewayOrderByCreatedAtDesc(UUID orderId, PaymentGateway paymentGateway);
+
+    long countByOrderIdAndPaymentGateway(UUID orderId, PaymentGateway paymentGateway);
 }

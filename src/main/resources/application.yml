@@ -33,8 +33,17 @@ springdoc:
 
 security:
   jwt:
-    secret-key: 404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+    # Base64, lo STESSO valore di product-service / order-service (stessa env var JWT_SECRET_KEY),
+    # altrimenti i token emessi da product-service non vengono validati qui.
+    # Il default è solo per sviluppo locale ed è identico a quello di order-service.
+    secret-key: ${JWT_SECRET_KEY:5uQO3B7O2eQMsJ4d9p8Ms3xj6pBHVC+NiinRx764CAc=}
     expiration: 86400000
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:4200}
+
+# order-service: sorgente di verità per importo e stato dell'ordine
+order-service:
+  base-url: ${ORDER_SERVICE_BASE_URL:http://localhost:8081/ecommerce-bj}
 
 gateway:
   culqi:
@@ -51,6 +60,12 @@ gateway:
     # Dove Nexi reindirizza l'utente dopo il pagamento (frontend)
     result-url: ${NEXI_RESULT_URL:http://localhost:3000/payment/result}
     cancel-url: ${NEXI_CANCEL_URL:http://localhost:3000/payment/cancel}
+  stripe:
+    # Secret key del backend (sk_test_... / sk_live_...). MAI la publishable key (pk_...) e MAI esposta al frontend.
+    # In locale puoi incollarla come default: ${STRIPE_SECRET_KEY:sk_test_xxx} — mai una chiave live in un file su git.
+    secret-key: ${STRIPE_SECRET_KEY:}
+    # Signing secret del webhook (whsec_...). In locale lo stampa `stripe listen --forward-to ...`.
+    webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
 
 logging:
   level:
