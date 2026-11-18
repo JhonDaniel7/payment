@@ -24,6 +24,7 @@ import com.stripe.model.Event;
 import com.stripe.model.EventDataObjectDeserializer;
 import com.stripe.model.PaymentIntent;
 import com.stripe.model.Refund;
+import com.stripe.model.StripeCollection;
 import com.stripe.model.StripeError;
 import com.stripe.model.StripeObject;
 import com.stripe.net.RequestOptions;
@@ -31,6 +32,7 @@ import com.stripe.net.Webhook;
 import com.stripe.param.PaymentIntentCreateParams;
 import com.stripe.param.PaymentIntentUpdateParams;
 import com.stripe.param.RefundCreateParams;
+import com.stripe.param.RefundListParams;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -42,6 +44,8 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
@@ -78,6 +82,12 @@ public class StripePaymentService {
             PaymentStatus.COMPLETED, PaymentStatus.REFUND_PENDING,
             PaymentStatus.PARTIALLY_REFUNDED, PaymentStatus.REFUNDED
     );
+
+    /** Refund statuses meaning the money is (going) back to the customer. */
+    private static final Set<String> ACTIVE_REFUND_STATUSES = Set.of("pending", "requires_action", "succeeded");
+
+    /** Refund statuses meaning the money came back to us: the customer was NOT refunded. */
+    private static final Set<String> FAILED_REFUND_STATUSES = Set.of("failed", "canceled");
 
     private static final Set<String> SEPA_COUNTRIES = Set.of(
             "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GR", "HR", "HU", "IE",
@@ -258,6 +268,7 @@ public class StripePaymentService {
             case "payment_intent.requires_action" -> onProgress(paymentIntentOf(event), PaymentStatus.REQUIRES_ACTION);
             case "payment_intent.canceled"       -> onCanceled(paymentIntentOf(event));
             case "charge.refunded"               -> onChargeRefunded(dataObjectOf(event, Charge.class));
+            case "refund.failed", "refund.updated" -> onRefundFailedOrUpdated(dataObjectOf(event, Refund.class));
             default                              -> log.debug("Stripe event {} ignored", event.getType());
         }
     }
@@ -335,64 +346,127 @@ public class StripePaymentService {
                 .ifPresent(this::markCancelled);
     }
 
-    /**
-     * A refund happened on Stripe — requested through our API or made directly from the Stripe dashboard.
-     * {@code amount_refunded} is cumulative, so the new refund is the difference with what we already
-     * recorded; a re-delivered event finds no difference and is a no-op.
-     */
+    /** A refund was created on Stripe — through our API or directly from the Stripe dashboard. */
     private void onChargeRefunded(Charge charge) {
-        if (charge.getPaymentIntent() == null || charge.getAmountRefunded() == null) {
-            log.warn("Stripe charge.refunded without payment_intent/amount_refunded (charge {}) — ignored", charge.getId());
+        if (charge.getPaymentIntent() == null) {
+            log.warn("Stripe charge.refunded without payment_intent (charge {}) — ignored", charge.getId());
             return;
         }
-        Optional<Payment> found = paymentRepository.findByTransactionId(charge.getPaymentIntent());
-        if (found.isEmpty()) {
-            log.warn("Stripe refund for unknown PaymentIntent {} — ignored", charge.getPaymentIntent());
-            return;
-        }
-        Payment payment = found.get();
+        findPaymentByIntent(charge.getPaymentIntent()).ifPresent(this::syncRefunds);
+    }
 
-        BigDecimal refundedTotal = BigDecimal.valueOf(charge.getAmountRefunded()).movePointLeft(2);
-        BigDecimal alreadyRecorded = payment.getRefundAmount() != null ? payment.getRefundAmount() : BigDecimal.ZERO;
-        BigDecimal newRefund = refundedTotal.subtract(alreadyRecorded);
-        if (newRefund.signum() <= 0) {
-            log.info("Stripe refund already recorded — paymentId={} refundedTotal={}", payment.getId(), refundedTotal);
+    /**
+     * {@code refund.failed}, or {@code refund.updated} to failed/canceled (a refund cancelled from the
+     * dashboard is a failure too): the money went back to OUR Stripe balance and the customer got nothing.
+     */
+    private void onRefundFailedOrUpdated(Refund refund) {
+        if (!FAILED_REFUND_STATUSES.contains(refund.getStatus())) {
+            return; // refund.updated for metadata, ARN, etc.
+        }
+        if (refund.getPaymentIntent() == null) {
+            log.warn("Stripe refund {} without payment_intent — ignored", refund.getId());
             return;
         }
+        findPaymentByIntent(refund.getPaymentIntent()).ifPresent(payment -> {
+            BigDecimal amount = refund.getAmount() == null ? null : BigDecimal.valueOf(refund.getAmount()).movePointLeft(2);
+            log.error("MANUAL ACTION REQUIRED — refund {} of {} on payment {} {} ({}): the customer did NOT receive "
+                            + "the money, refund them another way",
+                    refund.getId(), amount, payment.getId(), refund.getStatus(), refund.getFailureReason());
+            syncRefunds(payment);
+            payment.setNotes(truncate("Refund " + refund.getId() + " of " + amount + " " + refund.getStatus()
+                    + " (" + refund.getFailureReason() + ") — customer not refunded, refund them another way", 1000));
+            paymentRepository.save(payment);
+        });
+    }
 
-        boolean fullyRefunded = Boolean.TRUE.equals(charge.getRefunded())
-                || refundedTotal.compareTo(payment.getAmount()) >= 0;
-        payment.setRefundAmount(refundedTotal);
-        payment.setRefundedAt(LocalDateTime.now());
-        payment.setStatus(fullyRefunded ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED);
-        latestRefundId(charge).ifPresent(payment::setRefundTransactionId);
+    /**
+     * Rebuilds the refund state from Stripe's list of refunds of this payment — the source of truth —
+     * instead of trusting deltas. Every refund is sent to order-service under its own id
+     * ({@code stripe-refund:<id>}), and every failed one as its cancellation
+     * ({@code stripe-refund-failed:<id>}): order-service ignores references it already has, so any
+     * number of re-deliveries, in any order, converges to the same state.
+     */
+    private void syncRefunds(Payment payment) {
+        List<Refund> refunds = listRefunds(payment.getTransactionId()); // newest first
+
+        BigDecimal activeTotal = refunds.stream()
+                .filter(r -> ACTIVE_REFUND_STATUSES.contains(r.getStatus()))
+                .map(r -> BigDecimal.valueOf(r.getAmount()).movePointLeft(2))
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal previous = payment.getRefundAmount() != null ? payment.getRefundAmount() : BigDecimal.ZERO;
+
+        payment.setRefundAmount(activeTotal);
+        if (activeTotal.compareTo(previous) > 0) {
+            payment.setRefundedAt(LocalDateTime.now());
+        }
+        if (activeTotal.signum() == 0) {
+            // every refund failed: the payment is simply completed again (and refundable again)
+            if (SETTLED_STATUSES.contains(payment.getStatus())) {
+                payment.setStatus(PaymentStatus.COMPLETED);
+            }
+        } else {
+            payment.setStatus(activeTotal.compareTo(payment.getAmount()) >= 0
+                    ? PaymentStatus.REFUNDED : PaymentStatus.PARTIALLY_REFUNDED);
+        }
+        if (!refunds.isEmpty()) {
+            payment.setRefundTransactionId(refunds.get(0).getId());
+        }
         paymentRepository.save(payment);
-        log.info("Stripe refund recorded — paymentId={} +{} (total refunded {}) status={}",
-                payment.getId(), newRefund, refundedTotal, payment.getStatus());
+        log.info("Stripe refunds synced — paymentId={} refunded {} → {} status={}",
+                payment.getId(), previous, activeTotal, payment.getStatus());
 
-        // Cumulative amount in the reference: unique per refund step, identical on re-delivery
-        // → order-service ignores duplicates. Transport errors propagate → non-2xx → Stripe retries
-        // (the transaction rolls back, so the difference is recomputed on the retry).
-        String externalReference = "stripe:" + charge.getId() + ":" + charge.getAmountRefunded();
-        String reason = payment.getRefundReason() != null ? payment.getRefundReason() : "Stripe refund";
-        try {
-            OrderSnapshot order = orderServiceClient.getOrder(payment.getOrderId());
-            orderServiceClient.recordRefund(payment.getOrderId(), order.id(), externalReference, newRefund, reason);
-        } catch (OrderStateConflictException | OrderNotFoundException ex) {
-            // Retrying would not help: keep the payment updated, flag the order for manual alignment.
-            log.error("MANUAL ACTION REQUIRED — refund {} on payment {} not recorded on order {}: {}",
-                    externalReference, payment.getId(), payment.getOrderId(), ex.getMessage());
-            payment.setNotes(truncate("Refund not recorded on order — align manually: " + ex.getMessage(), 1000));
+        if (refunds.isEmpty()) return;
+
+        // Transport errors propagate → non-2xx → Stripe retries (the transaction rolls back).
+        OrderSnapshot order = orderServiceClient.getOrder(payment.getOrderId());
+        List<String> rejected = new ArrayList<>();
+        for (Refund refund : refunds.reversed()) { // oldest first: ledger in chronological order
+            String reference = "stripe-refund:" + refund.getId();
+            BigDecimal amount = BigDecimal.valueOf(refund.getAmount()).movePointLeft(2);
+            try {
+                if (ACTIVE_REFUND_STATUSES.contains(refund.getStatus())) {
+                    orderServiceClient.recordRefund(payment.getOrderId(), order.id(), reference, amount,
+                            "REFUND", null, refundReason(refund, payment));
+                } else if (FAILED_REFUND_STATUSES.contains(refund.getStatus())) {
+                    // no-op on order-service if the refund had never been recorded there
+                    orderServiceClient.recordRefund(payment.getOrderId(), order.id(), "stripe-refund-failed:" + refund.getId(),
+                            amount, "REFUND_FAILED", reference, "Refund " + refund.getStatus() + ": " + refund.getFailureReason());
+                }
+            } catch (OrderStateConflictException | OrderNotFoundException ex) {
+                rejected.add(refund.getId() + " (" + ex.getMessage() + ")");
+            }
+        }
+        if (!rejected.isEmpty()) {
+            // Retrying would not help: the payment is right, the order needs a manual fix.
+            log.error("MANUAL ACTION REQUIRED — refunds not recorded on order {} for payment {}: {}",
+                    payment.getOrderId(), payment.getId(), rejected);
+            payment.setNotes(truncate("Refund not recorded on order — align manually: " + rejected, 1000));
             paymentRepository.save(payment);
         }
     }
 
-    private static Optional<String> latestRefundId(Charge charge) {
-        if (charge.getRefunds() == null || charge.getRefunds().getData() == null
-                || charge.getRefunds().getData().isEmpty()) {
-            return Optional.empty();
+    private List<Refund> listRefunds(String paymentIntentId) {
+        RefundListParams params = RefundListParams.builder().setPaymentIntent(paymentIntentId).setLimit(100L).build();
+        StripeCollection<Refund> page = stripeCall("list Refunds", () -> stripe.v1().refunds().list(params));
+        if (Boolean.TRUE.equals(page.getHasMore())) {
+            log.warn("PaymentIntent {} has more than 100 refunds — only the latest 100 are synced", paymentIntentId);
         }
-        return Optional.ofNullable(charge.getRefunds().getData().get(0).getId()); // newest first
+        return page.getData() != null ? page.getData() : List.of();
+    }
+
+    private static String refundReason(Refund refund, Payment payment) {
+        if (refund.getMetadata() != null && refund.getMetadata().get("reason") != null) {
+            return refund.getMetadata().get("reason");
+        }
+        return payment.getRefundReason() != null ? payment.getRefundReason() : "Stripe refund";
+    }
+
+    private Optional<Payment> findPaymentByIntent(String paymentIntentId) {
+        Optional<Payment> payment = paymentRepository.findByTransactionId(paymentIntentId);
+        if (payment.isEmpty()) {
+            log.warn("Stripe refund event for unknown PaymentIntent {} — ignored", paymentIntentId);
+        }
+        return payment;
     }
 
     // ─────────────────────────────────────────────────────────
@@ -424,9 +498,11 @@ public class StripePaymentService {
         if (reason != null) {
             params.putMetadata("reason", truncate(reason, 500));
         }
-        // Keyed on the cumulative target: a double click asks for the same refund only once.
+        // Keyed on the cumulative target and on the last refund seen: a double click asks for the same
+        // refund only once, while a retry after a failed refund (same target, new last refund) is a new one.
+        String lastRefund = payment.getRefundTransactionId() != null ? payment.getRefundTransactionId() : "none";
         RequestOptions options = RequestOptions.builder()
-                .setIdempotencyKey("refund-" + payment.getId() + "-" + targetTotalMinor)
+                .setIdempotencyKey("refund-" + payment.getId() + "-" + targetTotalMinor + "-" + lastRefund)
                 .build();
 
         Refund refund = stripeCall("create Refund", () -> stripe.v1().refunds().create(params.build(), options));

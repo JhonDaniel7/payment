@@ -52,17 +52,20 @@ public class OrderServiceClient {
     }
 
     /**
-     * Records a refund in the order's ledger; order-service moves the order to PARTIALLY_REFUNDED / REFUNDED.
+     * Appends an entry to the order's refund ledger; order-service recomputes the order status.
      * Idempotent on {@code externalReference}: resubmitting the same value is a no-op.
      *
+     * @param type                      REFUND, or REFUND_FAILED to cancel a previous refund entry
+     * @param reversesExternalReference only for REFUND_FAILED: the entry being cancelled
      * @throws OrderStateConflictException if order-service rejects it (e.g. exceeds the refundable total)
      */
-    public void recordRefund(UUID orderId, Long orderInternalId, String externalReference,
-                             BigDecimal amount, String reason) {
+    public void recordRefund(UUID orderId, Long orderInternalId, String externalReference, BigDecimal amount,
+                             String type, String reversesExternalReference, String reason) {
         Map<String, Object> body = new HashMap<>();
         body.put("externalReference", externalReference);
         body.put("amount", amount);
-        body.put("type", "REFUND");
+        body.put("type", type);
+        if (reversesExternalReference != null) body.put("reversesExternalReference", reversesExternalReference);
         if (reason != null) body.put("reason", reason.length() > 255 ? reason.substring(0, 255) : reason);
         try {
             restClient.post()

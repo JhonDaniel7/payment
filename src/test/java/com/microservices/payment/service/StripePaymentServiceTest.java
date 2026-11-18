@@ -35,6 +35,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -235,44 +236,55 @@ class StripePaymentServiceTest {
         Payment payment = stripePayment("pi_123", PaymentStatus.COMPLETED);
         when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
         when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "PAID", "20.00", "EUR", "IT"));
-        String payload = chargeRefundedEvent(500, false);
+        stripeRefunds(refund("re_1", "succeeded", 500));
+        String payload = chargeRefundedEvent();
 
         service.handleWebhook(payload, sign(payload));
 
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.PARTIALLY_REFUNDED);
         assertThat(payment.getRefundAmount()).isEqualByComparingTo("5.00");
         assertThat(payment.getRefundTransactionId()).isEqualTo("re_1");
-        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe:ch_1:500"),
-                org.mockito.ArgumentMatchers.argThat(a -> a.compareTo(new BigDecimal("5.00")) == 0), anyString());
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund:re_1"),
+                amountEq("5.00"), eq("REFUND"), isNull(), anyString());
     }
 
     @Test
-    void chargeRefunded_redelivered_isNoOp() throws Exception {
-        Payment payment = stripePayment("pi_123", PaymentStatus.PARTIALLY_REFUNDED);
-        payment.setRefundAmount(new BigDecimal("5.00"));
-        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
-        String payload = chargeRefundedEvent(500, false);
-
-        service.handleWebhook(payload, sign(payload));
-
-        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.PARTIALLY_REFUNDED);
-        verify(orderServiceClient, never()).recordRefund(any(), any(), anyString(), any(), anyString());
-    }
-
-    @Test
-    void chargeRefunded_secondRefund_recordsOnlyTheDifference_andCompletesRefund() throws Exception {
+    void chargeRefunded_redelivered_sendsSameReference_soOrderServiceIgnoresIt() throws Exception {
         Payment payment = stripePayment("pi_123", PaymentStatus.PARTIALLY_REFUNDED);
         payment.setRefundAmount(new BigDecimal("5.00"));
         when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
         when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "PARTIALLY_REFUNDED", "20.00", "EUR", "IT"));
-        String payload = chargeRefundedEvent(2000, true);
+        stripeRefunds(refund("re_1", "succeeded", 500));
+        String payload = chargeRefundedEvent();
+
+        service.handleWebhook(payload, sign(payload));
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.PARTIALLY_REFUNDED);
+        assertThat(payment.getRefundAmount()).isEqualByComparingTo("5.00");
+        // always the same idempotency reference — never a new, double-counted one
+        verify(orderServiceClient, org.mockito.Mockito.times(2)).recordRefund(eq(orderId), eq(42L),
+                eq("stripe-refund:re_1"), any(), eq("REFUND"), isNull(), anyString());
+    }
+
+    @Test
+    void chargeRefunded_twoRefunds_fullyRefunded_eachRecordedUnderItsOwnId() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PARTIALLY_REFUNDED);
+        payment.setRefundAmount(new BigDecimal("5.00"));
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "PARTIALLY_REFUNDED", "20.00", "EUR", "IT"));
+        stripeRefunds(refund("re_2", "succeeded", 1500), refund("re_1", "succeeded", 500)); // newest first
+        String payload = chargeRefundedEvent();
 
         service.handleWebhook(payload, sign(payload));
 
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
         assertThat(payment.getRefundAmount()).isEqualByComparingTo("20.00");
-        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe:ch_1:2000"),
-                org.mockito.ArgumentMatchers.argThat(a -> a.compareTo(new BigDecimal("15.00")) == 0), anyString());
+        assertThat(payment.getRefundTransactionId()).isEqualTo("re_2");
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund:re_1"),
+                amountEq("5.00"), eq("REFUND"), isNull(), anyString());
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund:re_2"),
+                amountEq("15.00"), eq("REFUND"), isNull(), anyString());
     }
 
     @Test
@@ -280,9 +292,10 @@ class StripePaymentServiceTest {
         Payment payment = stripePayment("pi_123", PaymentStatus.COMPLETED);
         when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
         when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "PAID", "20.00", "EUR", "IT"));
+        stripeRefunds(refund("re_1", "succeeded", 500));
         org.mockito.Mockito.doThrow(new OrderStateConflictException("exceeds"))
-                .when(orderServiceClient).recordRefund(any(), any(), anyString(), any(), anyString());
-        String payload = chargeRefundedEvent(500, false);
+                .when(orderServiceClient).recordRefund(any(), any(), anyString(), any(), anyString(), any(), anyString());
+        String payload = chargeRefundedEvent();
 
         service.handleWebhook(payload, sign(payload));
 
@@ -291,12 +304,74 @@ class StripePaymentServiceTest {
     }
 
     @Test
+    void refundFailed_onlyRefund_paymentBackToCompleted_andOrderEntryCancelled() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PARTIALLY_REFUNDED);
+        payment.setRefundAmount(new BigDecimal("5.00"));
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "PARTIALLY_REFUNDED", "20.00", "EUR", "IT"));
+        stripeRefunds(refund("re_1", "failed", 500));
+        String payload = refundEvent("refund.failed", "re_1", "failed", 500);
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.COMPLETED);
+        assertThat(payment.getRefundAmount()).isEqualByComparingTo("0");
+        assertThat(payment.getNotes()).contains("re_1").contains("refund them another way");
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund-failed:re_1"),
+                amountEq("5.00"), eq("REFUND_FAILED"), eq("stripe-refund:re_1"), anyString());
+        verify(orderServiceClient, never()).recordRefund(any(), any(), anyString(), any(), eq("REFUND"), any(), anyString());
+    }
+
+    @Test
+    void refundFailed_oneOfTwo_keepsTheOtherRefund() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.REFUNDED);
+        payment.setRefundAmount(new BigDecimal("15.00"));
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "PARTIALLY_REFUNDED", "20.00", "EUR", "IT"));
+        stripeRefunds(refund("re_2", "failed", 1000), refund("re_1", "succeeded", 500));
+        String payload = refundEvent("refund.failed", "re_2", "failed", 1000);
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.PARTIALLY_REFUNDED);
+        assertThat(payment.getRefundAmount()).isEqualByComparingTo("5.00");
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund:re_1"),
+                amountEq("5.00"), eq("REFUND"), isNull(), anyString());
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund-failed:re_2"),
+                amountEq("10.00"), eq("REFUND_FAILED"), eq("stripe-refund:re_2"), anyString());
+    }
+
+    @Test
+    void refundUpdated_canceledFromDashboard_isHandledAsFailure() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.REFUNDED);
+        payment.setRefundAmount(new BigDecimal("20.00"));
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "REFUNDED", "20.00", "EUR", "IT"));
+        stripeRefunds(refund("re_1", "canceled", 2000));
+        String payload = refundEvent("refund.updated", "re_1", "canceled", 2000);
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.COMPLETED);
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund-failed:re_1"),
+                any(), eq("REFUND_FAILED"), eq("stripe-refund:re_1"), anyString());
+    }
+
+    @Test
+    void refundUpdated_notAFailure_isIgnored() throws Exception {
+        String payload = refundEvent("refund.updated", "re_1", "succeeded", 500);
+
+        service.handleWebhook(payload, sign(payload));
+
+        verify(refundService, never()).list(any(com.stripe.param.RefundListParams.class));
+        verify(orderServiceClient, never()).recordRefund(any(), any(), anyString(), any(), anyString(), any(), anyString());
+    }
+
+    @Test
     void requestRefund_callsStripeWithIdempotencyKey_andSetsRefundPending() throws Exception {
         Payment payment = stripePayment("pi_123", PaymentStatus.COMPLETED);
-        com.stripe.model.Refund refund = new com.stripe.model.Refund();
-        refund.setId("re_9");
-        refund.setStatus("pending");
-        when(refundService.create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class))).thenReturn(refund);
+        com.stripe.model.Refund created = refund("re_9", "pending", 750);
+        when(refundService.create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class))).thenReturn(created);
 
         service.requestRefund(payment, new BigDecimal("7.50"), "Reso cliente");
 
@@ -305,20 +380,61 @@ class StripePaymentServiceTest {
         verify(refundService).create(params.capture(), options.capture());
         assertThat(params.getValue().getPaymentIntent()).isEqualTo("pi_123");
         assertThat(params.getValue().getAmount()).isEqualTo(750L);
-        assertThat(options.getValue().getIdempotencyKey()).isEqualTo("refund-" + payment.getId() + "-750");
+        assertThat(options.getValue().getIdempotencyKey()).isEqualTo("refund-" + payment.getId() + "-750-none");
         assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUND_PENDING);
         assertThat(payment.getRefundTransactionId()).isEqualTo("re_9");
         // amounts are recorded only by the webhook
         assertThat(payment.getRefundAmount()).isNull();
     }
 
-    private static String chargeRefundedEvent(long amountRefunded, boolean fullyRefunded) {
+    @Test
+    void requestRefund_retryAfterFailedRefund_usesANewIdempotencyKey() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.COMPLETED);
+        payment.setRefundTransactionId("re_failed"); // previous attempt failed, payment back to COMPLETED
+        when(refundService.create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class)))
+                .thenReturn(refund("re_10", "pending", 750));
+
+        service.requestRefund(payment, new BigDecimal("7.50"), null);
+
+        ArgumentCaptor<RequestOptions> options = ArgumentCaptor.forClass(RequestOptions.class);
+        verify(refundService).create(any(com.stripe.param.RefundCreateParams.class), options.capture());
+        assertThat(options.getValue().getIdempotencyKey()).isEqualTo("refund-" + payment.getId() + "-750-re_failed");
+    }
+
+    private void stripeRefunds(com.stripe.model.Refund... refunds) throws Exception {
+        com.stripe.model.StripeCollection<com.stripe.model.Refund> page = new com.stripe.model.StripeCollection<>();
+        page.setData(java.util.List.of(refunds));
+        page.setHasMore(false);
+        when(refundService.list(any(com.stripe.param.RefundListParams.class))).thenReturn(page);
+    }
+
+    private static com.stripe.model.Refund refund(String id, String status, long amount) {
+        com.stripe.model.Refund refund = new com.stripe.model.Refund();
+        refund.setId(id);
+        refund.setStatus(status);
+        refund.setAmount(amount);
+        refund.setPaymentIntent("pi_123");
+        return refund;
+    }
+
+    private static BigDecimal amountEq(String expected) {
+        return org.mockito.ArgumentMatchers.argThat(a -> a != null && a.compareTo(new BigDecimal(expected)) == 0);
+    }
+
+    private static String chargeRefundedEvent() {
         return """
                 {"id":"evt_r","object":"event","api_version":"%s","type":"charge.refunded",
                  "data":{"object":{"id":"ch_1","object":"charge","payment_intent":"pi_123",
-                 "amount":2000,"amount_refunded":%d,"refunded":%s,"currency":"eur",
-                 "refunds":{"object":"list","data":[{"id":"re_1","object":"refund","amount":%d}]}}}}
-                """.formatted(Stripe.API_VERSION, amountRefunded, fullyRefunded, amountRefunded);
+                 "amount":2000,"currency":"eur"}}}
+                """.formatted(Stripe.API_VERSION);
+    }
+
+    private static String refundEvent(String type, String refundId, String status, long amount) {
+        return """
+                {"id":"evt_f","object":"event","api_version":"%s","type":"%s",
+                 "data":{"object":{"id":"%s","object":"refund","status":"%s","amount":%d,
+                 "payment_intent":"pi_123","charge":"ch_1","failure_reason":"expired_or_canceled_card"}}}
+                """.formatted(Stripe.API_VERSION, type, refundId, status, amount);
     }
 
     // ─────────────────────────────────────────────────────────
