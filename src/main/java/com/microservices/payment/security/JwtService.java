@@ -18,8 +18,16 @@ public class JwtService {
     @Value("${security.jwt.secret-key}")
     private String secretKey;
 
+    /** Same claim name product-service writes ("role": ADMIN | CLIENTE). */
+    private static final String ROLE_CLAIM = "role";
+
     public String extractSubject(String token) {
         return parseClaims(token).getSubject();
+    }
+
+    /** Null when the token carries no role. */
+    public String extractRole(String token) {
+        return parseClaims(token).get(ROLE_CLAIM, String.class);
     }
 
     public boolean isValid(String token) {

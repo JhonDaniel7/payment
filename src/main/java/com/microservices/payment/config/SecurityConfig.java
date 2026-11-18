@@ -6,6 +6,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -49,11 +51,20 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.POST, "/api/v1/webhooks/stripe").permitAll()
                 // Nexi HPP webhook — Nexi calls this after the user completes payment
                 .requestMatchers(HttpMethod.POST, "/api/v1/webhooks/nexi").permitAll()
-                // Legacy gateway webhook
-                .requestMatchers(HttpMethod.PATCH, "/api/v1/payments/*/status").permitAll()
+                // Culqi / Nexi payment creation by a logged-in customer
+                .requestMatchers(HttpMethod.POST, "/api/v1/payments").authenticated()
+                // Everything else on payments — list/read any payment, change status, refund,
+                // cancel, and any future endpoint: admins only, closed by default
+                .requestMatchers("/api/v1/payments/**").hasRole("ADMIN")
                 // Everything else requires a valid JWT
                 .anyRequest().authenticated()
             )
+            // No/invalid token → 401; logged in but not allowed → 403. Both set the status directly:
+            // the default sendError() re-dispatches to /error, where a stateless request is anonymous
+            // again and a 403 would come out as 401.
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
+                .accessDeniedHandler((request, response, denied) -> response.setStatus(HttpStatus.FORBIDDEN.value())))
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
