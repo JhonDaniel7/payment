@@ -1,11 +1,14 @@
 package com.microservices.payment.service;
 
+import com.microservices.payment.client.order.OrderServiceClient;
 import com.microservices.payment.dto.request.PaymentRequest;
 import com.microservices.payment.dto.request.PaymentStatusUpdateRequest;
 import com.microservices.payment.dto.request.RefundRequest;
 import com.microservices.payment.dto.response.PaymentPageResponse;
 import com.microservices.payment.dto.response.PaymentResponse;
 import com.microservices.payment.exception.InvalidPaymentStateException;
+import com.microservices.payment.exception.OrderNotFoundException;
+import com.microservices.payment.exception.OrderStateConflictException;
 import com.microservices.payment.exception.PaymentNotFoundException;
 import com.microservices.payment.gateway.GatewayResponse;
 import com.microservices.payment.gateway.PaymentGatewayPort;
@@ -50,6 +53,7 @@ public class PaymentServiceImpl implements PaymentService {
     private final PaymentRepository paymentRepository;
     private final List<PaymentGatewayPort> gateways;
     private final StripePaymentService stripePaymentService;
+    private final OrderServiceClient orderServiceClient;
 
     // ─────────────────────────────────────────────────────────
     // CREATE
@@ -91,6 +95,7 @@ public class PaymentServiceImpl implements PaymentService {
 
         GatewayResponse gatewayResponse = gateway.charge(request);
         applyGatewayResponse(payment, gatewayResponse);
+        notifyOrderIfPaid(payment);
 
         return toResponse(paymentRepository.save(payment));
     }
@@ -262,8 +267,34 @@ public class PaymentServiceImpl implements PaymentService {
             }
         }
 
+        notifyOrderIfPaid(payment);
         paymentRepository.save(payment);
         log.info("Payment updated from Nexi webhook — id={} status={}", payment.getId(), newStatus);
+    }
+
+    /**
+     * Culqi / Nexi: a COMPLETED payment moves the order to PAID (order-service is idempotent, so a
+     * re-delivered webhook is harmless). A failed attempt does NOT cancel the order: the customer
+     * can retry with a new payment. Never throws — the money is already collected, so the payment
+     * must be saved anyway; a failed sync is logged and written in the notes.
+     */
+    private void notifyOrderIfPaid(Payment payment) {
+        if (payment.getStatus() != PaymentStatus.COMPLETED || payment.getOrderId() == null) return;
+        try {
+            orderServiceClient.updateOrderPayment(payment.getOrderId(), payment.getId(), "PAID");
+        } catch (OrderStateConflictException | OrderNotFoundException ex) {
+            log.error("MANUAL ACTION — payment {} completed but order {} cannot be paid: {}",
+                    payment.getId(), payment.getOrderId(), ex.getMessage());
+            payment.setNotes(truncate("MANUAL ACTION: order not payable, refund the customer — " + ex.getMessage()));
+        } catch (RuntimeException ex) {
+            log.error("Order {} NOT updated to PAID for payment {}: {}",
+                    payment.getOrderId(), payment.getId(), ex.getMessage(), ex);
+            payment.setNotes(truncate("Order not updated to PAID: " + ex.getMessage()));
+        }
+    }
+
+    private static String truncate(String value) {
+        return value.length() <= 1000 ? value : value.substring(0, 1000);
     }
 
     private PaymentStatus mapNexiResult(String operationResult) {

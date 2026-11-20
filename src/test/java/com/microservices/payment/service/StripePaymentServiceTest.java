@@ -191,6 +191,70 @@ class StripePaymentServiceTest {
         verify(orderServiceClient).updateOrderPayment(orderId, payment.getId(), "PAID");
     }
 
+    // payment_intent.canceled — definitive failure → order CANCELLED
+
+    @Test
+    void webhook_canceled_cancelsPaymentAndOrder() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(paymentRepository.findByOrderId(orderId)).thenReturn(java.util.List.of(payment));
+        String payload = canceledEvent("pi_123", "requested_by_customer");
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.CANCELLED);
+        verify(orderServiceClient).updateOrderPayment(orderId, payment.getId(), "CANCELLED");
+    }
+
+    @Test
+    void webhook_canceled_replacedByNewIntent_orderLeftOpen() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        String payload = canceledEvent("pi_123", "duplicate");
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.CANCELLED);
+        verify(orderServiceClient, never()).updateOrderPayment(any(), any(), anyString());
+    }
+
+    @Test
+    void webhook_canceled_anotherPaymentAlive_orderLeftOpen() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
+        Payment other = stripePayment("pi_456", PaymentStatus.PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(paymentRepository.findByOrderId(orderId)).thenReturn(java.util.List.of(payment, other));
+        String payload = canceledEvent("pi_123", null);
+
+        service.handleWebhook(payload, sign(payload));
+
+        verify(orderServiceClient, never()).updateOrderPayment(any(), any(), anyString());
+    }
+
+    @Test
+    void webhook_canceled_orderAlreadyPaid_conflictIsAcknowledged() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(paymentRepository.findByOrderId(orderId)).thenReturn(java.util.List.of(payment));
+        org.mockito.Mockito.doThrow(new OrderStateConflictException("already PAID"))
+                .when(orderServiceClient).updateOrderPayment(eq(orderId), any(), eq("CANCELLED"));
+        String payload = canceledEvent("pi_123", null);
+
+        service.handleWebhook(payload, sign(payload)); // no exception → 200 to Stripe
+    }
+
+    @Test
+    void webhook_failed_doesNotCancelOrder_customerCanRetry() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        String payload = event("payment_intent.payment_failed", "pi_123", "requires_payment_method");
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.DECLINED);
+        verify(orderServiceClient, never()).updateOrderPayment(any(), any(), anyString());
+    }
+
     @Test
     void webhook_succeeded_orderServiceDown_propagatesSoStripeRetries() throws Exception {
         Payment payment = stripePayment("pi_123", PaymentStatus.PENDING);
@@ -555,6 +619,15 @@ class StripePaymentServiceTest {
                  "amount":2000,"amount_received":%d,"currency":"eur"%s}}}
                 """.formatted(Stripe.API_VERSION, type, intentId, intentStatus,
                 type.endsWith("succeeded") ? 2000 : 0, lastError);
+    }
+
+    private static String canceledEvent(String intentId, String cancellationReason) {
+        String reason = cancellationReason == null ? "null" : "\"" + cancellationReason + "\"";
+        return """
+                {"id":"evt_2","object":"event","api_version":"%s","type":"payment_intent.canceled",
+                 "data":{"object":{"id":"%s","object":"payment_intent","status":"canceled",
+                 "amount":2000,"currency":"eur","cancellation_reason":%s}}}
+                """.formatted(Stripe.API_VERSION, intentId, reason);
     }
 
     private static String sign(String payload) throws Exception {

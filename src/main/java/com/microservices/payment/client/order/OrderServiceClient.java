@@ -42,6 +42,7 @@ public class OrderServiceClient {
             }
             return order;
         } catch (RestClientResponseException ex) {
+            logIfRejectedKey(ex);
             if (ex.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) {
                 throw new OrderNotFoundException(orderId);
             }
@@ -76,6 +77,7 @@ public class OrderServiceClient {
                     .toBodilessEntity();
             log.info("order-service refund recorded — orderId={} amount={} ref={}", orderId, amount, externalReference);
         } catch (RestClientResponseException ex) {
+            logIfRejectedKey(ex);
             int code = ex.getStatusCode().value();
             if (code == HttpStatus.NOT_FOUND.value()) {
                 throw new OrderNotFoundException(orderId);
@@ -105,6 +107,7 @@ public class OrderServiceClient {
                     .toBodilessEntity();
             log.info("order-service updated — orderId={} status={} paymentId={}", orderId, status, paymentId);
         } catch (RestClientResponseException ex) {
+            logIfRejectedKey(ex);
             int code = ex.getStatusCode().value();
             if (code == HttpStatus.NOT_FOUND.value()) {
                 throw new OrderNotFoundException(orderId);
@@ -116,6 +119,15 @@ public class OrderServiceClient {
             throw new OrderServiceException("order-service returned " + ex.getStatusCode() + " updating order " + orderId, ex);
         } catch (RestClientException ex) {
             throw new OrderServiceException("order-service unreachable while updating order " + orderId, ex);
+        }
+    }
+
+    /** 401/403 from order-service = the internal key does not match: say so explicitly. */
+    private void logIfRejectedKey(RestClientResponseException ex) {
+        int code = ex.getStatusCode().value();
+        if (code == HttpStatus.UNAUTHORIZED.value() || code == HttpStatus.FORBIDDEN.value()) {
+            log.error("order-service rejected the internal key ({}): INTERNAL_API_KEY must be identical "
+                    + "on payment-service and order-service — {}", code, ex.getResponseBodyAsString());
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.microservices.payment.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -8,6 +9,7 @@ import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
 
+@Slf4j
 @Configuration
 public class OrderServiceConfig {
 
@@ -22,6 +24,10 @@ public class OrderServiceConfig {
 
     @Bean("orderServiceRestClient")
     public RestClient orderServiceRestClient() {
+        if (internalApiKey == null || internalApiKey.isBlank()) {
+            // e.g. INTERNAL_API_KEY defined but empty: every call to order-service would get 401
+            log.error("order-service.internal-api-key is EMPTY — set INTERNAL_API_KEY (same value as order-service)");
+        }
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(Duration.ofSeconds(3));
         requestFactory.setReadTimeout(Duration.ofSeconds(10));

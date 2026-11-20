@@ -29,6 +29,7 @@ import com.stripe.model.StripeError;
 import com.stripe.model.StripeObject;
 import com.stripe.net.RequestOptions;
 import com.stripe.net.Webhook;
+import com.stripe.param.PaymentIntentCancelParams;
 import com.stripe.param.PaymentIntentCreateParams;
 import com.stripe.param.PaymentIntentUpdateParams;
 import com.stripe.param.RefundCreateParams;
@@ -214,7 +215,11 @@ public class StripePaymentService {
 
         if (!stripeCurrency.equals(intent.getCurrency())) {
             // Currency changed (shipping country edited): an intent's currency is fixed, start over.
-            stripeCall("cancel PaymentIntent", () -> stripe.v1().paymentIntents().cancel(intent.getId()));
+            // "duplicate" = replaced by a new intent: the payment_intent.canceled webhook must NOT cancel the order
+            PaymentIntentCancelParams cancel = PaymentIntentCancelParams.builder()
+                    .setCancellationReason(PaymentIntentCancelParams.CancellationReason.DUPLICATE)
+                    .build();
+            stripeCall("cancel PaymentIntent", () -> stripe.v1().paymentIntents().cancel(intent.getId(), cancel));
             markCancelled(previous);
             return Optional.empty();
         }
@@ -378,10 +383,37 @@ public class StripePaymentService {
                 });
     }
 
+    /**
+     * A cancelled intent can no longer be paid — the definitive failure of the checkout — so the order
+     * is cancelled too, except when this service replaced the intent with a new one (reason
+     * "duplicate") or another payment of the same order is still alive. A declined card
+     * ({@code payment_failed}) is not definitive: the customer can retry, the order stays PENDING_PAYMENT.
+     */
     private void onCanceled(PaymentIntent intent) {
-        findPayment(intent)
-                .filter(p -> !SETTLED_STATUSES.contains(p.getStatus()))
-                .ifPresent(this::markCancelled);
+        Optional<Payment> found = findPayment(intent)
+                .filter(p -> !SETTLED_STATUSES.contains(p.getStatus()));
+        if (found.isEmpty()) return;
+        Payment payment = found.get();
+        markCancelled(payment);
+
+        if ("duplicate".equals(intent.getCancellationReason())) {
+            log.info("Stripe intent {} replaced by a new one — order {} left open", intent.getId(), payment.getOrderId());
+            return;
+        }
+        boolean anotherPaymentAlive = paymentRepository.findByOrderId(payment.getOrderId()).stream()
+                .anyMatch(p -> !p.getId().equals(payment.getId()) && p.getStatus() != PaymentStatus.CANCELLED
+                        && p.getStatus() != PaymentStatus.FAILED && p.getStatus() != PaymentStatus.DECLINED);
+        if (anotherPaymentAlive) {
+            log.info("Order {} has another active payment — not cancelled", payment.getOrderId());
+            return;
+        }
+        // A transport error propagates → non-2xx → Stripe retries the event.
+        try {
+            orderServiceClient.updateOrderPayment(payment.getOrderId(), payment.getId(), "CANCELLED");
+        } catch (OrderStateConflictException | OrderNotFoundException ex) {
+            // Already PAID / CANCELLED / gone: nothing left to cancel.
+            log.info("Order {} not cancelled: {}", payment.getOrderId(), ex.getMessage());
+        }
     }
 
     /** A refund was created on Stripe — through our API or directly from the Stripe dashboard. */
