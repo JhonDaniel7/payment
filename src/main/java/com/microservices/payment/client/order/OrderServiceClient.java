@@ -62,12 +62,23 @@ public class OrderServiceClient {
      */
     public void recordRefund(UUID orderId, Long orderInternalId, String externalReference, BigDecimal amount,
                              String type, String reversesExternalReference, String reason) {
+        recordRefund(orderId, orderInternalId, externalReference, amount, type, reversesExternalReference, reason, null);
+    }
+
+    /**
+     * Same as above, for a refund that pays out an order-service return.
+     *
+     * @param returnReference RMA number of the return (type RETURN, or REFUND_FAILED when it failed)
+     */
+    public void recordRefund(UUID orderId, Long orderInternalId, String externalReference, BigDecimal amount,
+                             String type, String reversesExternalReference, String reason, String returnReference) {
         Map<String, Object> body = new HashMap<>();
         body.put("externalReference", externalReference);
         body.put("amount", amount);
         body.put("type", type);
         if (reversesExternalReference != null) body.put("reversesExternalReference", reversesExternalReference);
         if (reason != null) body.put("reason", reason.length() > 255 ? reason.substring(0, 255) : reason);
+        if (returnReference != null) body.put("returnReference", returnReference);
         try {
             restClient.post()
                     .uri("/orders/{id}/refunds", orderInternalId)

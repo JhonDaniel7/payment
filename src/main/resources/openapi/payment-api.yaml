@@ -295,6 +295,12 @@ paths:
       description: |
         For STRIPE payments the refund is requested on Stripe and the payment goes to REFUND_PENDING;
         the final amounts and the order update arrive with the `charge.refunded` webhook.
+        Callable by an admin (JWT) or by order-service (header `X-Internal-Api-Key`) when it refunds an
+        approved return: `returnReference` is then stored on the Stripe refund, and the webhook records the
+        refund in the order's ledger as a RETURN linked to that return.
+      security:
+        - bearerAuth: []
+        - internalApiKey: []
       parameters:
         - $ref: '#/components/parameters/PaymentId'
       requestBody:
@@ -520,6 +526,18 @@ components:
           type: string
           maxLength: 500
           example: "Customer requested cancellation"
+        returnReference:
+          type: string
+          maxLength: 30
+          description: RMA number of the order-service return this refund pays out (Stripe only).
+          example: RMA-7K2M9QX4TB
+        idempotencyKey:
+          type: string
+          maxLength: 100
+          description: >
+            Stripe only. Same key = same refund (double click, retry after a timeout). Without it the key is
+            derived from the payment, the cumulative refunded amount and the last refund.
+          example: return-RMA-7K2M9QX4TB-0
 
     PaymentStatusUpdateRequest:
       type: object
@@ -825,6 +843,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    internalApiKey:
+      type: apiKey
+      in: header
+      name: X-Internal-Api-Key
+      description: Shared secret for service-to-service calls (INTERNAL_API_KEY), never sent by the browser.
 
 security:
   - bearerAuth: []

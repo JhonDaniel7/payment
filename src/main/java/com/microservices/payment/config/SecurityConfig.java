@@ -1,5 +1,6 @@
 package com.microservices.payment.config;
 
+import com.microservices.payment.security.InternalApiKeyFilter;
 import com.microservices.payment.security.JwtAuthenticationFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,6 +31,10 @@ public class SecurityConfig {
     @Value("${security.cors.allowed-origins}")
     private String allowedOrigins;
 
+    /** The same shared secret sent to order-service (INTERNAL_API_KEY), accepted here from order-service. */
+    @Value("${order-service.internal-api-key:}")
+    private String internalApiKey;
+
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
@@ -53,6 +58,8 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.POST, "/api/v1/webhooks/nexi").permitAll()
                 // Culqi / Nexi payment creation by a logged-in customer
                 .requestMatchers(HttpMethod.POST, "/api/v1/payments").authenticated()
+                // Refund: admins, or order-service (internal key) refunding an approved return
+                .requestMatchers(HttpMethod.POST, "/api/v1/payments/*/refund").hasAnyRole("ADMIN", InternalApiKeyFilter.ROLE)
                 // Everything else on payments — list/read any payment, change status, refund,
                 // cancel, and any future endpoint: admins only, closed by default
                 .requestMatchers("/api/v1/payments/**").hasRole("ADMIN")
@@ -65,7 +72,9 @@ public class SecurityConfig {
             .exceptionHandling(ex -> ex
                 .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
                 .accessDeniedHandler((request, response, denied) -> response.setStatus(HttpStatus.FORBIDDEN.value())))
-            .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+            .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
+            // before the JWT filter, which then leaves an already authenticated internal caller alone
+            .addFilterBefore(new InternalApiKeyFilter(internalApiKey), JwtAuthenticationFilter.class);
 
         return http.build();
     }

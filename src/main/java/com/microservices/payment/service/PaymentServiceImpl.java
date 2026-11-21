@@ -196,7 +196,8 @@ public class PaymentServiceImpl implements PaymentService {
         // Stripe payments are refunded on Stripe (region/method routing would pick another gateway).
         // The outcome is recorded asynchronously by the charge.refunded webhook.
         if (payment.getPaymentGateway() == PaymentGateway.STRIPE) {
-            return toResponse(stripePaymentService.requestRefund(payment, request.getRefundAmount(), request.getRefundReason()));
+            return toResponse(stripePaymentService.requestRefund(payment, request.getRefundAmount(), request.getRefundReason(),
+                    request.getReturnReference(), request.getIdempotencyKey()));
         }
 
         PaymentGatewayPort gateway = resolveGateway(payment.getPaymentRegion(), payment.getPaymentMethod());

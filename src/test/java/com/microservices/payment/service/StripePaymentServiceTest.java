@@ -541,6 +541,67 @@ class StripePaymentServiceTest {
         assertThat(options.getValue().getIdempotencyKey()).isEqualTo("refund-" + payment.getId() + "-750-re_failed");
     }
 
+    // ─────────────────────────────────────────────────────────
+    // refunds of order-service returns
+    // ─────────────────────────────────────────────────────────
+
+    @Test
+    void requestRefund_forAReturn_storesTheReturnOnTheRefund_andUsesTheCallersIdempotencyKey() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.COMPLETED);
+        when(refundService.create(any(com.stripe.param.RefundCreateParams.class), any(RequestOptions.class)))
+                .thenReturn(refund("re_9", "pending", 750));
+
+        service.requestRefund(payment, new BigDecimal("7.50"), "Reso RMA-7K2M9QX4TB", "RMA-7K2M9QX4TB", "return-RMA-7K2M9QX4TB-0");
+
+        ArgumentCaptor<com.stripe.param.RefundCreateParams> params = ArgumentCaptor.forClass(com.stripe.param.RefundCreateParams.class);
+        ArgumentCaptor<RequestOptions> options = ArgumentCaptor.forClass(RequestOptions.class);
+        verify(refundService).create(params.capture(), options.capture());
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, Object> metadata = (java.util.Map<String, Object>) (Object) params.getValue().getMetadata();
+        assertThat(metadata).containsEntry("returnReference", "RMA-7K2M9QX4TB");
+        assertThat(options.getValue().getIdempotencyKey())
+                .isEqualTo("refund-" + payment.getId() + "-ext-return-RMA-7K2M9QX4TB-0");
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUND_PENDING);
+    }
+
+    @Test
+    void chargeRefunded_refundOfAReturn_isRecordedAsReturnLinkedToIt() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.REFUND_PENDING);
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "DELIVERED", "20.00", "EUR", "IT"));
+        stripeRefunds(returnRefund("re_1", "succeeded", 2000));
+        String payload = chargeRefundedEvent();
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.REFUNDED);
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund:re_1"),
+                amountEq("20.00"), eq("RETURN"), isNull(), anyString(), eq("RMA-7K2M9QX4TB"));
+        verify(orderServiceClient, never()).recordRefund(any(), any(), anyString(), any(), eq("REFUND"), any(), anyString());
+    }
+
+    @Test
+    void refundFailed_refundOfAReturn_cancellationCarriesTheReturn() throws Exception {
+        Payment payment = stripePayment("pi_123", PaymentStatus.REFUNDED);
+        payment.setRefundAmount(new BigDecimal("20.00"));
+        when(paymentRepository.findByTransactionId("pi_123")).thenReturn(Optional.of(payment));
+        when(orderServiceClient.getOrder(orderId)).thenReturn(order(null, "REFUNDED", "20.00", "EUR", "IT"));
+        stripeRefunds(returnRefund("re_1", "failed", 2000));
+        String payload = refundEvent("refund.failed", "re_1", "failed", 2000);
+
+        service.handleWebhook(payload, sign(payload));
+
+        assertThat(payment.getStatus()).isEqualTo(PaymentStatus.COMPLETED);
+        verify(orderServiceClient).recordRefund(eq(orderId), eq(42L), eq("stripe-refund-failed:re_1"),
+                amountEq("20.00"), eq("REFUND_FAILED"), eq("stripe-refund:re_1"), anyString(), eq("RMA-7K2M9QX4TB"));
+    }
+
+    private static com.stripe.model.Refund returnRefund(String id, String status, long amount) {
+        com.stripe.model.Refund refund = refund(id, status, amount);
+        refund.setMetadata(java.util.Map.of("returnReference", "RMA-7K2M9QX4TB", "reason", "Reso RMA-7K2M9QX4TB"));
+        return refund;
+    }
+
     private void stripeRefunds(com.stripe.model.Refund... refunds) throws Exception {
         com.stripe.model.StripeCollection<com.stripe.model.Refund> page = new com.stripe.model.StripeCollection<>();
         page.setData(java.util.List.of(refunds));

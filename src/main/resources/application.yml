@@ -44,7 +44,8 @@ security:
 # order-service: sorgente di verità per importo e stato dell'ordine
 order-service:
   base-url: ${ORDER_SERVICE_BASE_URL:http://localhost:8081/ecommerce-bj}
-  # Password interna inviata a order-service (header X-Internal-Api-Key): deve essere uguale
+  # Password interna condivisa con order-service (header X-Internal-Api-Key), usata nei due sensi:
+  # inviata a order-service, e accettata qui quando order-service chiede il rimborso di un reso. Deve essere uguale
   # a INTERNAL_API_KEY di order-service. Il default è solo per sviluppo locale.
   internal-api-key: ${INTERNAL_API_KEY:jUdifyLh49t/vV+3qwNnEPKbFrSBJCjcPLlNumlf9rU=}
 

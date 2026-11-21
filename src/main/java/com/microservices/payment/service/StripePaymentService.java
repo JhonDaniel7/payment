@@ -87,6 +87,9 @@ public class StripePaymentService {
     /** Refund statuses meaning the money is (going) back to the customer. */
     private static final Set<String> ACTIVE_REFUND_STATUSES = Set.of("pending", "requires_action", "succeeded");
 
+    /** Refund metadata key carrying the RMA number of the order-service return the refund pays out. */
+    static final String RETURN_REFERENCE_METADATA = "returnReference";
+
     /** Refund statuses meaning the money came back to us: the customer was NOT refunded. */
     private static final Set<String> FAILED_REFUND_STATUSES = Set.of("failed", "canceled");
 
@@ -498,14 +501,29 @@ public class StripePaymentService {
             }
             String reference = "stripe-refund:" + refund.getId();
             BigDecimal amount = BigDecimal.valueOf(refund.getAmount()).movePointLeft(2);
+            // Refund of an order-service return: recorded as RETURN and linked to it, so the return follows
+            // the outcome (REFUNDED / REFUND_FAILED). Any other refund keeps the plain REFUND path.
+            String returnReference = returnReference(refund);
             try {
                 if (ACTIVE_REFUND_STATUSES.contains(refund.getStatus())) {
-                    orderServiceClient.recordRefund(payment.getOrderId(), order.id(), reference, amount,
-                            "REFUND", null, refundReason(refund, payment));
+                    if (returnReference != null) {
+                        orderServiceClient.recordRefund(payment.getOrderId(), order.id(), reference, amount,
+                                "RETURN", null, refundReason(refund, payment), returnReference);
+                    } else {
+                        orderServiceClient.recordRefund(payment.getOrderId(), order.id(), reference, amount,
+                                "REFUND", null, refundReason(refund, payment));
+                    }
                 } else if (FAILED_REFUND_STATUSES.contains(refund.getStatus())) {
                     // no-op on order-service if the refund had never been recorded there
-                    orderServiceClient.recordRefund(payment.getOrderId(), order.id(), "stripe-refund-failed:" + refund.getId(),
-                            amount, "REFUND_FAILED", reference, "Refund " + refund.getStatus() + ": " + refund.getFailureReason());
+                    // (except that a return still waiting for it becomes REFUND_FAILED)
+                    String failure = "Refund " + refund.getStatus() + ": " + refund.getFailureReason();
+                    if (returnReference != null) {
+                        orderServiceClient.recordRefund(payment.getOrderId(), order.id(), "stripe-refund-failed:" + refund.getId(),
+                                amount, "REFUND_FAILED", reference, failure, returnReference);
+                    } else {
+                        orderServiceClient.recordRefund(payment.getOrderId(), order.id(), "stripe-refund-failed:" + refund.getId(),
+                                amount, "REFUND_FAILED", reference, failure);
+                    }
                 }
             } catch (OrderStateConflictException | OrderNotFoundException ex) {
                 rejected.add(refund.getId() + " (" + ex.getMessage() + ")");
@@ -531,6 +549,11 @@ public class StripePaymentService {
 
     private static boolean isAutoRefund(Refund refund) {
         return refund.getMetadata() != null && "true".equals(refund.getMetadata().get("autoRefund"));
+    }
+
+    private static String returnReference(Refund refund) {
+        String value = refund.getMetadata() != null ? refund.getMetadata().get(RETURN_REFERENCE_METADATA) : null;
+        return value == null || value.isBlank() ? null : value;
     }
 
     private static String refundReason(Refund refund, Payment payment) {
@@ -561,6 +584,17 @@ public class StripePaymentService {
      */
     @Transactional
     public Payment requestRefund(Payment payment, BigDecimal amount, String reason) {
+        return requestRefund(payment, amount, reason, null, null);
+    }
+
+    /**
+     * @param returnReference RMA number of an order-service return: stored in the refund's metadata, so that
+     *                        {@link #syncRefunds} records it in the order's ledger as a RETURN of that return
+     * @param idempotencyKey  caller-provided key (order-service: one per return refund attempt), null = derived
+     */
+    @Transactional
+    public Payment requestRefund(Payment payment, BigDecimal amount, String reason,
+                                 String returnReference, String idempotencyKey) {
         if (secretKey == null || secretKey.isBlank()) {
             throw new GatewayException("Stripe is not configured: set STRIPE_SECRET_KEY");
         }
@@ -577,12 +611,17 @@ public class StripePaymentService {
         if (reason != null) {
             params.putMetadata("reason", truncate(reason, 500));
         }
-        // Keyed on the cumulative target and on the last refund seen: a double click asks for the same
-        // refund only once, while a retry after a failed refund (same target, new last refund) is a new one.
+        if (returnReference != null && !returnReference.isBlank()) {
+            params.putMetadata(RETURN_REFERENCE_METADATA, returnReference);
+        }
+        // Default: keyed on the cumulative target and on the last refund seen: a double click asks for the
+        // same refund only once, while a retry after a failed refund (same target, new last refund) is a new
+        // one. A caller key (always scoped to this payment) lets the caller decide what "the same refund" is.
         String lastRefund = payment.getRefundTransactionId() != null ? payment.getRefundTransactionId() : "none";
-        RequestOptions options = RequestOptions.builder()
-                .setIdempotencyKey("refund-" + payment.getId() + "-" + targetTotalMinor + "-" + lastRefund)
-                .build();
+        String key = idempotencyKey != null && !idempotencyKey.isBlank()
+                ? "refund-" + payment.getId() + "-ext-" + idempotencyKey
+                : "refund-" + payment.getId() + "-" + targetTotalMinor + "-" + lastRefund;
+        RequestOptions options = RequestOptions.builder().setIdempotencyKey(key).build();
 
         Refund refund = stripeCall("create Refund", () -> stripe.v1().refunds().create(params.build(), options));
 
