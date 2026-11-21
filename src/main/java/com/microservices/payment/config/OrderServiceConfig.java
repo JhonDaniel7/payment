@@ -4,9 +4,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
+import java.net.http.HttpClient;
 import java.time.Duration;
 
 @Slf4j
@@ -28,8 +29,9 @@ public class OrderServiceConfig {
             // e.g. INTERNAL_API_KEY defined but empty: every call to order-service would get 401
             log.error("order-service.internal-api-key is EMPTY — set INTERNAL_API_KEY (same value as order-service)");
         }
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(Duration.ofSeconds(3));
+        // JDK HttpClient: unlike HttpURLConnection (SimpleClientHttpRequestFactory) it supports PATCH
+        HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
         requestFactory.setReadTimeout(Duration.ofSeconds(10));
         return RestClient.builder()
                 .baseUrl(baseUrl)
