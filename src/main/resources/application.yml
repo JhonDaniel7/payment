@@ -49,6 +49,17 @@ order-service:
   # a INTERNAL_API_KEY di order-service. Il default è solo per sviluppo locale.
   internal-api-key: ${INTERNAL_API_KEY:jUdifyLh49t/vV+3qwNnEPKbFrSBJCjcPLlNumlf9rU=}
 
+# reCAPTCHA v3 sull'endpoint pubblico chiamato dal frontend (POST /api/v1/payments/intents):
+# header X-Recaptcha-Token verificato con Google siteverify, altrimenti 403 {"code":"RECAPTCHA_FAILED"}.
+# RECAPTCHA_SECRET_KEY è la chiave lato server (MAI la site key usata da Angular, MAI su git).
+recaptcha:
+  enabled: ${RECAPTCHA_ENABLED:true}
+  secret-key: ${RECAPTCHA_SECRET_KEY:}
+  min-score: ${RECAPTCHA_MIN_SCORE:0.5}
+  # separati da virgola, es. localhost,www.example.com
+  allowed-hostnames: ${RECAPTCHA_ALLOWED_HOSTNAMES:localhost}
+  verify-url: https://www.google.com/recaptcha/api/siteverify
+
 gateway:
   culqi:
     base-url: ${CULQI_BASE_URL:https://api.culqi.com/v2}

@@ -2,6 +2,9 @@ package com.microservices.payment.config;
 
 import com.microservices.payment.security.InternalApiKeyFilter;
 import com.microservices.payment.security.JwtAuthenticationFilter;
+import com.microservices.payment.security.recaptcha.RecaptchaFilter;
+import com.microservices.payment.security.recaptcha.RecaptchaProperties;
+import com.microservices.payment.security.recaptcha.RecaptchaVerifier;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -18,8 +21,10 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.filter.CorsFilter;
 
 import java.util.List;
+import java.util.Map;
 
 @Configuration
 @EnableWebSecurity
@@ -27,6 +32,8 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final RecaptchaProperties recaptchaProperties;
+    private final RecaptchaVerifier recaptchaVerifier;
 
     @Value("${security.cors.allowed-origins}")
     private String allowedOrigins;
@@ -74,7 +81,12 @@ public class SecurityConfig {
                 .accessDeniedHandler((request, response, denied) -> response.setStatus(HttpStatus.FORBIDDEN.value())))
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
             // before the JWT filter, which then leaves an already authenticated internal caller alone
-            .addFilterBefore(new InternalApiKeyFilter(internalApiKey), JwtAuthenticationFilter.class);
+            .addFilterBefore(new InternalApiKeyFilter(internalApiKey), JwtAuthenticationFilter.class)
+            // reCAPTCHA v3 only on the public endpoint called by the browser (not webhooks/internal/admin calls):
+            // right after CORS, so preflights never reach it and a 403 still carries the CORS headers
+            .addFilterAfter(new RecaptchaFilter(recaptchaProperties, recaptchaVerifier, Map.of(
+                RecaptchaFilter.endpoint(HttpMethod.POST, "/api/v1/payments/intents"), "payment_intent"
+            )), CorsFilter.class);
 
         return http.build();
     }
